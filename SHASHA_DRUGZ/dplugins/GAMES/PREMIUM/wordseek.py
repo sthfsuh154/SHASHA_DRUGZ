@@ -335,7 +335,7 @@ async def _get_redis():
         )
         await client.ping()
         _redis_client = client
-        logger.info("[WordSeek] Redis connected: %s", REDIS_URL)
+        #logger.info("[WordSeek] Redis connected: %s", REDIS_URL)
         return _redis_client
     except Exception as exc:
         logger.warning("[WordSeek] Redis unavailable, falling back to in-memory: %s", exc)
