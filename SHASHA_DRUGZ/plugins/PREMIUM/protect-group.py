@@ -106,7 +106,7 @@ def _check_words(raw: str):
     for pattern, label in _COMPILED:
         m = pattern.search(raw)
         if m:
-            print(f"[BW] REGEX HIT: pattern='{label}' matched='{m.group()}' in '{raw[:80]}'")
+            #print(f"[BW] REGEX HIT: pattern='{label}' matched='{m.group()}' in '{raw[:80]}'")
             return m.group()
     return None
 
@@ -115,7 +115,7 @@ def _check_custom(raw: str, wordlist: list):
     for w in wordlist:
         nw = _norm(w)
         if nw and nw in n:
-            print(f"[BW] CUSTOM HIT: '{nw}' in '{n[:80]}'")
+            #print(f"[BW] CUSTOM HIT: '{nw}' in '{n[:80]}'")
             return w
     return None
 
@@ -454,7 +454,7 @@ async def _enforce(client: Client, message: Message):
         cid = message.chat.id
         s   = await _get_settings(cid)
         if not s["enabled"]:
-            print(f"[BW] SKIP: disabled chat={cid}")
+            #print(f"[BW] SKIP: disabled chat={cid}")
             return
 
         user = message.from_user
@@ -464,7 +464,7 @@ async def _enforce(client: Client, message: Message):
         if user.id in ADMINS_ID:
             return
 
-        print(f"[BW] _enforce CALLED uid={user.id} chat={cid} text={raw[:60]!r}")
+        #print(f"[BW] _enforce CALLED uid={user.id} chat={cid} text={raw[:60]!r}")
 
         # Resolve role
         is_admin = False
@@ -486,14 +486,14 @@ async def _enforce(client: Client, message: Message):
         if not hit:
             hit = _check_custom(raw, await _group_words(cid))
 
-        print(f"[BW] RESULT uid={user.id} hit={hit!r}")
+        #print(f"[BW] RESULT uid={user.id} hit={hit!r}")
         if not hit:
             return
 
         # Delete offending message
         try:
             await message.delete()
-            print(f"[BW] DELETED uid={user.id}")
+            #print(f"[BW] DELETED uid={user.id}")
         except Exception as e:
             print(f"[BW] DELETE FAILED: {e}")
 
@@ -564,7 +564,7 @@ async def _enforce(client: Client, message: Message):
                 )
                 await _set_muted(cid, user.id, True)
                 atxt = "🔇 **Muted** (1 h)"
-            print(f"[BW] PUNISHED uid={user.id} action={action}")
+            #print(f"[BW] PUNISHED uid={user.id} action={action}")
         except Exception as e:
             atxt = f"⚠️ Action failed: `{e}`"
             print(f"[BW] PUNISH FAILED uid={user.id}: {e}")
