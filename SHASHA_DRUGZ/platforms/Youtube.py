@@ -5,11 +5,16 @@
 # ║  On bot/auth    : cookies wiped & regenerated INFINITELY until success      ║
 # ║  No email/password used anywhere                                             ║
 # ║                                                                              ║
+# ║  Progress bar   : shown in group chats during /play /vplay downloads        ║
+# ║    Format:                                                                   ║
+# ║      Song Nam.. (13 chars)                                                   ║
+# ║      🎵 [▓▓▓▓▓▓░░░░] 61%                                                    ║
+# ║      24MB/40MB • 2.1MB/s • ETA 6s                                           ║
+# ║                                                                              ║
 # ║  Log messages   :                                                            ║
 # ║    Blocked  → 🚫 Amazon/AWS IP Detected                                     ║
 # ║    Success  → 🌐 YouTube Cookies Extracted (with IP / Location / ISP)       ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
-
 import asyncio
 import os
 import re
@@ -19,18 +24,15 @@ import time
 import datetime
 import logging
 from typing import Union, Optional, Tuple
-
 import aiohttp
 import yt_dlp
 from playwright.async_api import async_playwright
 from pyrogram.enums import MessageEntityType
 from pyrogram.types import Message
-
 try:
     from youtubesearchpython.__future__ import VideosSearch
 except ImportError:
     from py_yt import VideosSearch
-
 from SHASHA_DRUGZ import app, LOGGER
 from SHASHA_DRUGZ.utils.formatters import time_to_seconds
 from config import LOG_GROUP_ID
@@ -38,34 +40,32 @@ from config import LOG_GROUP_ID
 # ══════════════════════════════════════════════════════════════════════════════
 #  ENVIRONMENT / CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
-
 API_URL  = os.getenv("API_URL", "https://shrutibots.site").rstrip("/")
 API_KEY  = os.getenv("API_KEY", "")
-
 PLAY_URL = os.getenv(
     "PLAY_URL", "https://youtu.be/ip8o5hDFLhI?si=jCdWYdBAEulr2b49")
-
-ENABLE_YT_COOKIES  = os.getenv("ENABLE_YT_COOKIES",  "true").lower() == "true"
+ENABLE_YT_COOKIES    = os.getenv("ENABLE_YT_COOKIES",  "true").lower() == "true"
 AUTO_REFRESH_COOKIES = True
-
-YTDLP_PROXIES      = os.getenv("YTDLP_PROXIES",      "")
-PLAYWRIGHT_PROXIES = os.getenv("PLAYWRIGHT_PROXIES",  "")
+YTDLP_PROXIES        = os.getenv("YTDLP_PROXIES",      "")
+PLAYWRIGHT_PROXIES   = os.getenv("PLAYWRIGHT_PROXIES",  "")
 
 # How often (seconds) the IP-quality background watcher polls
 IP_POLL_INTERVAL = int(os.getenv("IP_POLL_INTERVAL", "60"))
 
 # API retries (hard cap — API should be reliable)
 MAX_API_RETRIES   = 3
+
 # Give up only after this many *consecutive* non-auth yt-dlp errors
-# (prevents spinning forever on truly unavailable videos)
 MAX_NON_AUTH_ERRS = 5
+
+# Progress bar update throttle (seconds) — avoids Telegram flood-wait
+PROGRESS_UPDATE_INTERVAL = 3
 
 # ── Directories ───────────────────────────────────────────────────────────────
 DOWNLOAD_DIR           = os.path.join(os.getcwd(), "downloads")
 COOKIES_DIR            = os.path.join(os.getcwd(), "cookies")
 PLAYWRIGHT_PROFILE_DIR = os.path.join(os.getcwd(), "playwright_profile")
 YT_CACHE_DIR           = os.path.join(os.getcwd(), "ytcache")
-
 for _d in (DOWNLOAD_DIR, COOKIES_DIR, PLAYWRIGHT_PROFILE_DIR, YT_CACHE_DIR):
     os.makedirs(_d, exist_ok=True)
 
@@ -85,7 +85,6 @@ USER_AGENTS = [
 # ══════════════════════════════════════════════════════════════════════════════
 #  BLOCKED ORG KEYWORDS  (Amazon / AWS only)
 # ══════════════════════════════════════════════════════════════════════════════
-
 BLOCKED_ORG_KEYWORDS = [
     "amazon", "amazon.com", "amazon technologies", "amazon data services",
     "amazon cloudfront", "amazon web services", "aws", "as16509", "as14618",
@@ -95,13 +94,11 @@ _IS_BLOCKED_IP:   bool = False
 _CURRENT_IP_INFO: dict = {}
 _GOOD_IP_EVENT         = None   # asyncio.Event — lazy-init inside running loop
 
-
 def _good_ip_event() -> asyncio.Event:
     global _GOOD_IP_EVENT
     if _GOOD_IP_EVENT is None:
         _GOOD_IP_EVENT = asyncio.Event()
     return _GOOD_IP_EVENT
-
 
 def is_blocked_ip() -> bool:
     return _IS_BLOCKED_IP
@@ -109,7 +106,6 @@ def is_blocked_ip() -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 #  LOGGER
 # ══════════════════════════════════════════════════════════════════════════════
-
 def get_logger(name: str):
     try:
         return LOGGER(name)
@@ -128,7 +124,6 @@ logger = get_logger("SHASHA_DRUGZ/platforms/Youtube.py")
 # ══════════════════════════════════════════════════════════════════════════════
 #  PROXY HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
-
 def _parse_proxy_list(proxy_env: str) -> list:
     return [p.strip() for p in proxy_env.split(",") if p.strip()]
 
@@ -141,7 +136,6 @@ def choose_random_proxy(pool: list) -> Optional[str]:
 # ══════════════════════════════════════════════════════════════════════════════
 #  COOKIE CLEANUP
 # ══════════════════════════════════════════════════════════════════════════════
-
 def clear_old_cookies():
     try:
         for f in glob.glob(os.path.join(COOKIES_DIR, "*")):
@@ -156,7 +150,6 @@ def clear_old_cookies():
 # ══════════════════════════════════════════════════════════════════════════════
 #  LOG GROUP HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
-
 async def send_to_log_group(text: str = None, file_obj=None):
     if not LOG_GROUP_ID:
         return
@@ -168,7 +161,6 @@ async def send_to_log_group(text: str = None, file_obj=None):
             await app.send_message(chat_id=LOG_GROUP_ID, text=text)
     except Exception as e:
         logger.error(f"Failed to send to log group: {e}")
-
 
 async def send_cookie_file_to_log_group(reason: str = ""):
     if not os.path.exists(COOKIE_FILE):
@@ -201,7 +193,6 @@ async def send_cookie_file_to_log_group(reason: str = ""):
 # ══════════════════════════════════════════════════════════════════════════════
 #  PUBLIC IP INFO
 # ══════════════════════════════════════════════════════════════════════════════
-
 async def get_public_ip_info() -> Optional[dict]:
     try:
         async with aiohttp.ClientSession() as session:
@@ -224,13 +215,7 @@ async def get_public_ip_info() -> Optional[dict]:
 # ══════════════════════════════════════════════════════════════════════════════
 #  IP QUALITY CHECK
 # ══════════════════════════════════════════════════════════════════════════════
-
 async def check_ip_quality() -> bool:
-    """
-    Returns True  → IP is GOOD  (Railway, residential, non-Amazon)
-    Returns False → IP is BAD   (Amazon / AWS)
-    Does NOT set _good_ip_event — only _ip_watcher_loop / startup do that.
-    """
     global _IS_BLOCKED_IP, _CURRENT_IP_INFO
     info = await get_public_ip_info()
     if not info:
@@ -238,11 +223,9 @@ async def check_ip_quality() -> bool:
         _CURRENT_IP_INFO = {}
         logger.warning("⚠️ Could not fetch IP info — assuming good IP")
         return True
-
     _CURRENT_IP_INFO = info
     org = (info.get("org") or "").lower()
     _IS_BLOCKED_IP = any(kw in org for kw in BLOCKED_ORG_KEYWORDS)
-
     if _IS_BLOCKED_IP:
         _good_ip_event().clear()
         logger.warning(
@@ -259,11 +242,9 @@ async def check_ip_quality() -> bool:
     return not _IS_BLOCKED_IP
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  WAIT FOR GOOD IP  (used at start of every download)
+#  WAIT FOR GOOD IP
 # ══════════════════════════════════════════════════════════════════════════════
-
 async def wait_for_good_ip() -> None:
-    """Suspend until IP is confirmed non-Amazon AND cookies are ready."""
     if not _IS_BLOCKED_IP and _good_ip_event().is_set():
         return
     info = _CURRENT_IP_INFO
@@ -277,7 +258,6 @@ async def wait_for_good_ip() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 #  BACKGROUND IP WATCHER
 # ══════════════════════════════════════════════════════════════════════════════
-
 async def _ip_watcher_loop():
     logger.info(f"🔍 IP watcher started — polling every {IP_POLL_INTERVAL}s …")
     while True:
@@ -286,7 +266,6 @@ async def _ip_watcher_loop():
         good        = await check_ip_quality()
         info        = _CURRENT_IP_INFO
         timestamp   = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-
         if was_blocked and good:
             logger.info("🎉 IP changed to GOOD — generating cookies before resuming …")
             await send_to_log_group(
@@ -314,7 +293,6 @@ async def _ip_watcher_loop():
                     f"#GoodIP #Resumed"
                 )
             )
-
         elif not was_blocked and not good:
             logger.warning("😱 IP changed to Amazon/AWS — suspending all downloads …")
             await send_to_log_group(
@@ -335,7 +313,6 @@ async def _ip_watcher_loop():
 # ══════════════════════════════════════════════════════════════════════════════
 #  PLAYWRIGHT PROFILE LOCK CLEANUP
 # ══════════════════════════════════════════════════════════════════════════════
-
 def cleanup_playwright_profile():
     for fname in ("SingletonLock", "SingletonCookie",
                   "SingletonSocket", "DevToolsActivePort"):
@@ -348,9 +325,8 @@ def cleanup_playwright_profile():
                 logger.warning(f"Could not remove {fname}: {e}")
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  BROWSER PROFILE COOKIE GENERATION  (no email/password — guest session only)
+#  BROWSER PROFILE COOKIE GENERATION
 # ══════════════════════════════════════════════════════════════════════════════
-
 async def generate_cookies_via_playwright(
     reason: str = "Profile cookie generation",
 ) -> bool:
@@ -367,7 +343,6 @@ async def generate_cookies_via_playwright(
     proxy      = choose_random_proxy(PLAYWRIGHT_PROXY_POOL)
     user_agent = random.choice(USER_AGENTS)
     context    = None
-
     try:
         async with async_playwright() as p:
             context = await p.chromium.launch_persistent_context(
@@ -387,14 +362,12 @@ async def generate_cookies_via_playwright(
                 ignore_https_errors=True,
             )
             page = await context.new_page()
-
             await page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
                 Object.defineProperty(navigator, 'plugins',   { get: () => [1, 2, 3, 4, 5] });
                 window.chrome = { runtime: {} };
             """)
-
             try:
                 logger.info("🔗 Visiting accounts.google.com …")
                 await page.goto("https://accounts.google.com",
@@ -402,7 +375,6 @@ async def generate_cookies_via_playwright(
                 await page.wait_for_timeout(4000)
             except Exception as e:
                 logger.warning(f"accounts.google.com warning: {e}")
-
             try:
                 logger.info("🔗 Visiting youtube.com …")
                 await page.goto("https://www.youtube.com",
@@ -415,7 +387,6 @@ async def generate_cookies_via_playwright(
                 await page.wait_for_timeout(random.randint(500, 1000))
             except Exception as e:
                 logger.warning(f"youtube.com warning: {e}")
-
             if PLAY_URL:
                 try:
                     logger.info(f"🎬 Priming session with PLAY_URL: {PLAY_URL}")
@@ -428,18 +399,15 @@ async def generate_cookies_via_playwright(
                     await page.wait_for_timeout(random.randint(1000, 2000))
                 except Exception as e:
                     logger.warning(f"PLAY_URL prime warning: {e}")
-
             try:
                 await page.goto("https://www.youtube.com/feed/trending",
                                 wait_until="domcontentloaded", timeout=30_000)
                 await page.wait_for_timeout(3000)
             except Exception:
                 pass
-
             await context.close()
             logger.info("✅ Browser profile cookies refreshed successfully")
             return True
-
     except Exception as e:
         logger.error(f"❌ Playwright cookie generation error: {str(e)[:300]}")
         if context:
@@ -460,7 +428,6 @@ async def generate_cookies_via_playwright(
 # ══════════════════════════════════════════════════════════════════════════════
 #  EXTRACT COOKIES FROM BROWSER PROFILE
 # ══════════════════════════════════════════════════════════════════════════════
-
 async def _extract_cookies_from_profile() -> bool:
     logger.info("🔄 Extracting cookies from browser profile …")
     cmd = [
@@ -493,21 +460,10 @@ async def _extract_cookies_from_profile() -> bool:
         return False
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  AUTO-GENERATE COOKIES  (infinite inner loop — no email/password)
-#
-#  Sends the rich "🌐 YouTube Cookies Extracted" message with IP + Location
-#  on success, matching exactly the format requested.
+#  AUTO-GENERATE COOKIES
 # ══════════════════════════════════════════════════════════════════════════════
-
 async def auto_generate_cookies(reason: str = "auto") -> Optional[str]:
-    """
-    Generates COOKIE_FILE via headless browser.
-    Runs up to 5 sub-attempts per call.
-    Returns COOKIE_FILE on success, None when all 5 sub-attempts fail.
-    The caller loops infinitely when None is returned.
-    """
     async with _COOKIE_LOCK:
-        # Another coroutine may have already refreshed while we waited
         if (
             os.path.exists(COOKIE_FILE)
             and verify_cookies_file(COOKIE_FILE)
@@ -515,22 +471,17 @@ async def auto_generate_cookies(reason: str = "auto") -> Optional[str]:
         ):
             logger.info("✅ Cookies already refreshed by another coroutine — reusing.")
             return COOKIE_FILE
-
         clear_old_cookies()
-
         for sub in range(1, 6):
             logger.info(f"🔄 Cookie generation sub-attempt {sub}/5 [{reason}] …")
-
             ok = await generate_cookies_via_playwright(
                 reason=f"{reason} (sub {sub})")
             if not ok:
                 logger.warning(f"Browser session failed on sub-attempt {sub}.")
                 await asyncio.sleep(min(5 * sub, 30))
                 continue
-
             ok = await _extract_cookies_from_profile()
             if ok:
-                # ── Success: send rich log message with IP + Location ──────
                 ip_info   = await get_public_ip_info() or {}
                 timestamp = datetime.datetime.utcnow().strftime(
                     "%Y-%m-%d %H:%M:%S UTC")
@@ -548,10 +499,8 @@ async def auto_generate_cookies(reason: str = "auto") -> Optional[str]:
                 )
                 await send_cookie_file_to_log_group(reason=reason)
                 return COOKIE_FILE
-
             logger.warning(f"Cookie extraction failed on sub-attempt {sub}.")
             await asyncio.sleep(min(5 * sub, 30))
-
         logger.error(
             "❌ All 5 sub-attempts failed — outer infinite loop will retry …")
         return None
@@ -559,20 +508,16 @@ async def auto_generate_cookies(reason: str = "auto") -> Optional[str]:
 # ══════════════════════════════════════════════════════════════════════════════
 #  COOKIE VERIFICATION
 # ══════════════════════════════════════════════════════════════════════════════
-
 def verify_cookies_file(filename: str) -> bool:
     try:
         if not os.path.exists(filename):
             logger.error(f"Cookies file does not exist: {filename}")
             return False
-
         with open(filename, "r", encoding="utf-8") as f:
             content = f.read()
-
         if "youtube.com" not in content and ".youtube.com" not in content:
             logger.error("No youtube.com domain in cookies file")
             return False
-
         important_cookies = [
             "VISITOR_INFO1_LIVE", "PREF", "GPS", "YSC",
             "SOCS", "__Secure-ROLLOUT_TOKEN", "__Secure-YNID",
@@ -582,11 +527,9 @@ def verify_cookies_file(filename: str) -> bool:
         if len(found) < 2:
             logger.warning(f"⚠️ Too few important cookies found: {found}")
             return False
-
         if content.strip().startswith("{") or '"domain"' in content:
             logger.error("Cookies file is JSON format, not Netscape")
             return False
-
         valid_lines = 0
         for line in content.strip().split("\n"):
             if line.startswith("#") or not line.strip():
@@ -595,19 +538,15 @@ def verify_cookies_file(filename: str) -> bool:
                 logger.error(f"Invalid Netscape format (no tabs): {line[:100]}")
                 return False
             valid_lines += 1
-
         if valid_lines < 3:
             logger.error(f"Too few valid cookie lines: {valid_lines}")
             return False
-
         logger.info(
             f"✅ Cookies verified: {filename} | lines={valid_lines} | found={found}")
         return True
-
     except Exception as e:
         logger.error(f"Error verifying cookies file: {e}")
         return False
-
 
 def get_cookie_min_expiry(filepath: str) -> Optional[int]:
     try:
@@ -636,7 +575,6 @@ def get_cookie_min_expiry(filepath: str) -> Optional[int]:
         logger.error(f"Failed to parse cookie expiry: {e}")
         return None
 
-
 def is_cookie_file_expired(filepath: str) -> bool:
     if not os.path.exists(filepath):
         logger.info("❌ Cookie file missing → expired")
@@ -662,7 +600,6 @@ def is_cookie_file_expired(filepath: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 #  ERROR CLASSIFIERS
 # ══════════════════════════════════════════════════════════════════════════════
-
 _AUTH_SIGNALS = [
     "sign in to confirm you're not a bot",
     "confirm you are not a robot",
@@ -689,11 +626,9 @@ _FORMAT_SIGNALS = [
     "format is not available",
 ]
 
-
 def is_auth_error(exc: Exception) -> bool:
     s = str(exc).lower()
     return any(sig in s for sig in _AUTH_SIGNALS)
-
 
 def is_format_error(exc: Exception) -> bool:
     s = str(exc).lower()
@@ -702,16 +637,13 @@ def is_format_error(exc: Exception) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN COOKIE GETTER
 # ══════════════════════════════════════════════════════════════════════════════
-
 async def get_cookies(force_refresh: bool = False) -> Optional[str]:
     if not ENABLE_YT_COOKIES:
         return None
-
     if force_refresh:
         logger.warning("🔄 Force refreshing cookies …")
         clear_old_cookies()
         return await auto_generate_cookies(reason="Force refresh – auth/robot/manual")
-
     if (
         os.path.exists(COOKIE_FILE)
         and verify_cookies_file(COOKIE_FILE)
@@ -719,7 +651,6 @@ async def get_cookies(force_refresh: bool = False) -> Optional[str]:
     ):
         logger.info("✅ Using existing valid cookies")
         return COOKIE_FILE
-
     logger.warning("⚠️ Cookies invalid or expired → regenerating …")
     clear_old_cookies()
     return await auto_generate_cookies(reason="Initial / expired")
@@ -727,7 +658,6 @@ async def get_cookies(force_refresh: bool = False) -> Optional[str]:
 # ══════════════════════════════════════════════════════════════════════════════
 #  VIDEO ID EXTRACTION
 # ══════════════════════════════════════════════════════════════════════════════
-
 _VID_PATTERNS = [
     r"(?:v=|youtu\.be/|shorts/|embed/)([A-Za-z0-9_-]{11})",
     r"watch\?v=([A-Za-z0-9_-]{11})",
@@ -735,7 +665,6 @@ _VID_PATTERNS = [
     r"shorts/([A-Za-z0-9_-]{11})",
     r"embed/([A-Za-z0-9_-]{11})",
 ]
-
 
 def extract_video_id(url: str) -> Optional[str]:
     if not url:
@@ -753,7 +682,6 @@ def extract_video_id(url: str) -> Optional[str]:
 # ══════════════════════════════════════════════════════════════════════════════
 #  YT-DLP OPTIONS BUILDER
 # ══════════════════════════════════════════════════════════════════════════════
-
 def get_ytdlp_opts(
     extra_opts: dict = None,
     use_cookie_file: str = None,
@@ -778,23 +706,18 @@ def get_ytdlp_opts(
             "Accept-Language": "en-US,en;q=0.9",
         },
     }
-
     if use_cookie_file and os.path.isfile(use_cookie_file):
         base["cookiefile"] = use_cookie_file
         logger.debug(f"Using cookiefile: {use_cookie_file}")
     else:
-        # Fallback: read directly from persistent Chromium profile
         base["cookiesfrombrowser"] = ("chrome", PLAYWRIGHT_PROFILE_DIR)
         logger.debug("Falling back to cookiesfrombrowser with persistent profile")
-
     proxy = choose_random_proxy(YTDLP_PROXY_POOL)
     if proxy:
         base["proxy"] = proxy
-
     if extra_opts:
         base.update(extra_opts)
     return base
-
 
 def _audio_extra() -> dict:
     return {
@@ -806,7 +729,6 @@ def _audio_extra() -> dict:
         }],
     }
 
-
 def _video_extra() -> dict:
     return {
         "format":              "bv*+ba/b",
@@ -816,7 +738,6 @@ def _video_extra() -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 #  FILE FINDER
 # ══════════════════════════════════════════════════════════════════════════════
-
 def _get_downloaded_file(
     video_id: str, prefer_m4a: bool = False
 ) -> Optional[str]:
@@ -838,21 +759,151 @@ def _get_downloaded_file(
     return None
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  METHOD 1 — API DOWNLOAD
+#  PROGRESS BAR HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
+def _make_progress_bar(percent: float, length: int = 10) -> str:
+    """Build a block-style progress bar string."""
+    filled = int(length * percent / 100)
+    bar    = "▓" * filled + "░" * (length - filled)
+    return f"[{bar}]"
 
+def _fmt_bytes(num_bytes: float) -> str:
+    """Format bytes into human-readable MB/KB."""
+    if num_bytes is None:
+        return "?MB"
+    mb = num_bytes / (1024 * 1024)
+    if mb >= 1:
+        return f"{mb:.1f}MB"
+    kb = num_bytes / 1024
+    return f"{kb:.0f}KB"
+
+def _fmt_speed(speed: float) -> str:
+    """Format bytes/s into human-readable speed."""
+    if speed is None or speed <= 0:
+        return "?MB/s"
+    mb = speed / (1024 * 1024)
+    if mb >= 1:
+        return f"{mb:.1f}MB/s"
+    kb = speed / 1024
+    return f"{kb:.0f}KB/s"
+
+def _fmt_eta(eta_seconds) -> str:
+    """Format ETA seconds into human-readable string."""
+    if eta_seconds is None:
+        return "?s"
+    eta = int(eta_seconds)
+    if eta >= 3600:
+        return f"{eta // 3600}h {(eta % 3600) // 60}m"
+    if eta >= 60:
+        return f"{eta // 60}m {eta % 60}s"
+    return f"{eta}s"
+
+def _build_progress_text(title: str, d: dict) -> str:
+    """
+    Build the 3-line progress message shown in the group chat.
+
+    Song Nam.. (max 13 visible chars)
+    🎵 [▓▓▓▓▓▓░░░░] 61%
+    24MB/40MB • 2.1MB/s • ETA 6s
+    """
+    short_title = (title[:13] + "..") if len(title) > 13 else title
+
+    downloaded = d.get("downloaded_bytes", 0) or 0
+    total      = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+    speed      = d.get("speed") or 0
+    eta        = d.get("eta")
+
+    if total > 0:
+        percent = min(downloaded / total * 100, 100)
+    else:
+        percent = 0
+
+    bar  = _make_progress_bar(percent)
+    line1 = f"🎵 `{short_title}`"
+    line2 = f"🎵 {bar} `{percent:.0f}%`"
+    line3 = f"`{_fmt_bytes(downloaded)}/{_fmt_bytes(total)}` • `{_fmt_speed(speed)}` • ETA `{_fmt_eta(eta)}`"
+    return f"{line1}\n{line2}\n{line3}"
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PROGRESS HOOK FACTORY
+#  Creates a yt-dlp progress_hook that schedules Telegram message edits.
+#  Uses a shared mutable dict to avoid threading issues with asyncio.
+# ══════════════════════════════════════════════════════════════════════════════
+def make_progress_hook(
+    loop: asyncio.AbstractEventLoop,
+    mystic,
+    title: str,
+) -> callable:
+    """
+    Returns a yt-dlp progress_hook function.
+    mystic  — the Pyrogram Message object to edit in place
+    title   — song/video title for display
+    loop    — the running asyncio event loop
+    """
+    state = {
+        "last_update": 0.0,
+        "finished":    False,
+    }
+
+    def hook(d: dict):
+        if state["finished"]:
+            return
+        now = time.time()
+        status = d.get("status", "")
+
+        if status == "finished":
+            state["finished"] = True
+            asyncio.run_coroutine_threadsafe(
+                _safe_edit(mystic, f"🎵 `{(title[:13] + '..') if len(title) > 13 else title}`\n✅ Download complete, processing…"),
+                loop,
+            )
+            return
+
+        if status == "downloading":
+            if now - state["last_update"] < PROGRESS_UPDATE_INTERVAL:
+                return
+            state["last_update"] = now
+            text = _build_progress_text(title, d)
+            asyncio.run_coroutine_threadsafe(
+                _safe_edit(mystic, text),
+                loop,
+            )
+
+    return hook
+
+async def _safe_edit(mystic, text: str):
+    """Edit mystic message safely, ignoring flood-wait and message-not-modified errors."""
+    try:
+        await mystic.edit_text(text)
+    except Exception as e:
+        err = str(e).lower()
+        # Ignore "message not modified" and flood-wait silently
+        if "not modified" in err or "flood" in err or "too many" in err:
+            pass
+        # Ignore if message was deleted
+        elif "message to edit not found" in err or "message_id_invalid" in err:
+            pass
+        else:
+            logger.debug(f"Progress edit error (ignored): {e}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  METHOD 1 — API DOWNLOAD  (with progress bar support)
+# ══════════════════════════════════════════════════════════════════════════════
 async def _download_via_api(
-    video_id: str, media_type: str
+    video_id: str,
+    media_type: str,
+    mystic=None,
+    title: str = "",
 ) -> Optional[str]:
     if not API_URL:
         return None
-
     ext      = "mp3" if media_type == "audio" else "mp4"
     out_path = os.path.join(DOWNLOAD_DIR, f"{video_id}.{ext}")
     headers  = {"Content-Type": "application/json"}
     if API_KEY:
         headers["X-API-KEY"] = API_KEY
 
+    display_title = title or video_id
     logger.info(f"📡 [API] {media_type} download for {video_id} …")
 
     for attempt in range(1, MAX_API_RETRIES + 1):
@@ -882,6 +933,11 @@ async def _download_via_api(
                     if not dl_url.startswith("http"):
                         dl_url = API_URL + dl_url
 
+                # ── Stream file with progress updates ─────────────────────
+                last_update  = 0.0
+                downloaded   = 0
+                total        = 0
+                start_time   = time.time()
                 async with session.get(
                     dl_url,
                     headers=headers,
@@ -890,16 +946,34 @@ async def _download_via_api(
                 ) as file_resp:
                     if file_resp.status not in (200, 206):
                         raise ValueError(f"File stream → HTTP {file_resp.status}")
+                    total = int(file_resp.headers.get("Content-Length", 0))
                     with open(out_path, "wb") as fh:
                         async for chunk in file_resp.content.iter_chunked(16_384):
                             fh.write(chunk)
+                            downloaded += len(chunk)
+                            now = time.time()
+                            # Send progress update if mystic is provided
+                            if mystic and now - last_update >= PROGRESS_UPDATE_INTERVAL:
+                                last_update = now
+                                elapsed  = max(now - start_time, 0.001)
+                                speed    = downloaded / elapsed
+                                eta      = ((total - downloaded) / speed) if speed > 0 and total > 0 else None
+                                fake_d   = {
+                                    "downloaded_bytes": downloaded,
+                                    "total_bytes":      total if total > 0 else None,
+                                    "speed":            speed,
+                                    "eta":              eta,
+                                }
+                                text = _build_progress_text(display_title, fake_d)
+                                await _safe_edit(mystic, text)
 
             if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                 logger.info(f"✅ [API] Downloaded: {out_path}")
+                if mystic:
+                    short = (display_title[:13] + "..") if len(display_title) > 13 else display_title
+                    await _safe_edit(mystic, f"🎵 `{short}`\n✅ Download complete, processing…")
                 return out_path
-
             raise ValueError("File is empty after API download.")
-
         except Exception as exc:
             logger.warning(f"[API] Attempt {attempt}/{MAX_API_RETRIES} failed: {exc}")
             if os.path.exists(out_path):
@@ -909,31 +983,23 @@ async def _download_via_api(
                     pass
             if attempt < MAX_API_RETRIES:
                 await asyncio.sleep(2 * attempt)
-
     logger.error("[API] All attempts exhausted.")
     return None
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  METHODS 2 & 3 — YT-DLP  ── INFINITE RETRY ON AUTH/BOT ERROR ──
-#
-#  Auth / bot-detection / file-not-found:
-#    Cookies wiped → auto_generate_cookies() called (5 sub-attempts per call).
-#    If None returned, inner loop calls it again immediately — no cap.
-#    Continues until file lands on disk.
-#
-#  Format-unavailable: switches to "best" once, then retries.
-#
-#  Other errors (network, truly unavailable): MAX_NON_AUTH_ERRS cap, then None.
+#  METHODS 2 & 3 — YT-DLP  (with progress bar support)
 # ══════════════════════════════════════════════════════════════════════════════
-
-async def download_with_ytdlp(link: str, is_audio: bool) -> Optional[str]:
+async def download_with_ytdlp(
+    link: str,
+    is_audio: bool,
+    mystic=None,
+    title: str = "",
+) -> Optional[str]:
     video_id = extract_video_id(link)
     if not video_id:
         logger.error(f"Could not extract video ID from {link}")
         return None
-
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
     existing = _get_downloaded_file(video_id)
     if existing:
         logger.info(f"📁 File already exists: {existing}")
@@ -962,28 +1028,35 @@ async def download_with_ytdlp(link: str, is_audio: bool) -> Optional[str]:
     non_auth_errors = 0
     cookie_cycle    = 0
     label           = "🎵" if is_audio else "🎬"
+    display_title   = title or video_id
 
-    def _build_opts(cf: Optional[str]) -> dict:
+    def _build_opts(cf: Optional[str], prog_hook=None) -> dict:
         if format_fallback:
             fallback: dict = {"format": "best"}
             if is_audio:
                 fallback["postprocessors"] = _audio_extra()["postprocessors"]
             else:
                 fallback["merge_output_format"] = "mp4"
-            return get_ytdlp_opts(fallback, use_cookie_file=cf)
-        extra = _audio_extra() if is_audio else _video_extra()
-        return get_ytdlp_opts(extra, use_cookie_file=cf)
+            opts = get_ytdlp_opts(fallback, use_cookie_file=cf)
+        else:
+            extra = _audio_extra() if is_audio else _video_extra()
+            opts  = get_ytdlp_opts(extra, use_cookie_file=cf)
+        if prog_hook:
+            opts["progress_hooks"] = [prog_hook]
+        return opts
 
     # ── Infinite loop ─────────────────────────────────────────────────────
     while True:
-        ydl_opts = _build_opts(cookie_file)
+        # Build a fresh progress hook each attempt so state resets cleanly
+        prog_hook = make_progress_hook(loop, mystic, display_title) if mystic else None
+        ydl_opts  = _build_opts(cookie_file, prog_hook)
+
         logger.info(
             f"{label} [yt-dlp] {video_id} | "
             f"cookie_cycle={cookie_cycle} | "
             f"non_auth_errs={non_auth_errors} | "
             f"format_fallback={format_fallback}"
         )
-
         try:
             await asyncio.sleep(random.uniform(0.5, 2.0))
             async with DOWNLOAD_SEMAPHORE:
@@ -992,19 +1065,15 @@ async def download_with_ytdlp(link: str, is_audio: bool) -> Optional[str]:
                         None,
                         lambda: ydl.extract_info(link, download=True),
                     )
-
             file_path = _get_downloaded_file(video_id)
             if not file_path and info:
                 candidate = info.get("_filename") or info.get("filepath")
                 if candidate and os.path.exists(candidate):
                     file_path = candidate
-
             if file_path and os.path.exists(file_path):
                 logger.info(f"✅ {label} Download successful: {file_path}")
                 return file_path
-
             raise RuntimeError("File not found after yt-dlp download completed.")
-
         except Exception as exc:
             err_str = str(exc)
             logger.error(f"{label} [yt-dlp] Error: {err_str[:300]}")
@@ -1054,8 +1123,6 @@ async def download_with_ytdlp(link: str, is_audio: bool) -> Optional[str]:
                         f"#YouTubeCookies"
                     )
                 )
-
-                # Inner loop — no cap; runs until we actually get cookies
                 new_cf      = None
                 inner_cycle = 0
                 while new_cf is None:
@@ -1077,7 +1144,6 @@ async def download_with_ytdlp(link: str, is_audio: bool) -> Optional[str]:
                             f"retrying in {wait_s} s …"
                         )
                         await asyncio.sleep(wait_s)
-
                 cookie_file     = new_cf
                 format_fallback = False
                 logger.info(
@@ -1087,7 +1153,7 @@ async def download_with_ytdlp(link: str, is_audio: bool) -> Optional[str]:
                 await asyncio.sleep(random.uniform(1, 3))
                 continue
 
-            # ── Other errors (network, truly unavailable, etc.) ───────────
+            # ── Other errors ──────────────────────────────────────────────
             non_auth_errors += 1
             logger.warning(
                 f"Non-auth error #{non_auth_errors}/{MAX_NON_AUTH_ERRS}: "
@@ -1096,8 +1162,7 @@ async def download_with_ytdlp(link: str, is_audio: bool) -> Optional[str]:
             if non_auth_errors >= MAX_NON_AUTH_ERRS:
                 logger.error(
                     f"{label} Giving up on {video_id} after "
-                    f"{MAX_NON_AUTH_ERRS} consecutive non-auth errors. "
-                    f"Video may be genuinely unavailable."
+                    f"{MAX_NON_AUTH_ERRS} consecutive non-auth errors."
                 )
                 return None
             await asyncio.sleep(5 * non_auth_errors)
@@ -1105,33 +1170,37 @@ async def download_with_ytdlp(link: str, is_audio: bool) -> Optional[str]:
 # ══════════════════════════════════════════════════════════════════════════════
 #  PUBLIC DOWNLOAD WRAPPERS
 # ══════════════════════════════════════════════════════════════════════════════
-
-async def download_song(link: str) -> Optional[str]:
+async def download_song(
+    link: str,
+    mystic=None,
+    title: str = "",
+) -> Optional[str]:
     logger.info(f"🎵 Downloading audio: {link}")
     vid    = extract_video_id(link) or link
-    result = await _download_via_api(vid, "audio")
+    result = await _download_via_api(vid, "audio", mystic=mystic, title=title)
     if result:
         return result
     logger.info("🎵 API failed / not configured — falling back to yt-dlp …")
-    return await download_with_ytdlp(link, is_audio=True)
+    return await download_with_ytdlp(link, is_audio=True, mystic=mystic, title=title)
 
-
-async def download_video(link: str) -> Optional[str]:
+async def download_video(
+    link: str,
+    mystic=None,
+    title: str = "",
+) -> Optional[str]:
     logger.info(f"🎬 Downloading video: {link}")
     vid    = extract_video_id(link) or link
-    result = await _download_via_api(vid, "video")
+    result = await _download_via_api(vid, "video", mystic=mystic, title=title)
     if result:
         return result
     logger.info("🎬 API failed / not configured — falling back to yt-dlp …")
-    return await download_with_ytdlp(link, is_audio=False)
+    return await download_with_ytdlp(link, is_audio=False, mystic=mystic, title=title)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  STREAMING HELPER
 # ══════════════════════════════════════════════════════════════════════════════
-
 STREAM_MIN_SIZE = 500_000
 STREAM_FORMAT   = "140/bestaudio"
-
 
 async def wait_for_partial_file(
     file_path: str,
@@ -1143,23 +1212,19 @@ async def wait_for_partial_file(
             return
         await asyncio.sleep(check_interval)
 
-
 async def download_song_stream(
     link: str,
 ) -> Tuple[Optional[str], Optional[asyncio.Task]]:
     video_id = extract_video_id(link)
     if not video_id:
         return None, None
-
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     existing = _get_downloaded_file(video_id, prefer_m4a=True)
     if existing:
         return existing, None
-
     if is_blocked_ip():
         logger.warning("🚫 Stream queued — waiting for non-Amazon IP …")
         await wait_for_good_ip()
-
     cookie_file   = await get_cookies()
     ydl_opts      = get_ytdlp_opts(
         {"format": STREAM_FORMAT}, use_cookie_file=cookie_file)
@@ -1184,12 +1249,10 @@ async def download_song_stream(
 # ══════════════════════════════════════════════════════════════════════════════
 #  PLAY_URL AUTO-TEST
 # ══════════════════════════════════════════════════════════════════════════════
-
 async def test_cookie_with_playurl(retries: int = 2):
     if not PLAY_URL:
         logger.warning("PLAY_URL not set — skipping auto-test.")
         return
-
     if is_blocked_ip():
         info = _CURRENT_IP_INFO
         logger.warning(
@@ -1206,7 +1269,6 @@ async def test_cookie_with_playurl(retries: int = 2):
             )
         )
         return
-
     if retries <= 0:
         logger.error("❌ PLAY_URL test: max retries reached")
         await send_to_log_group(
@@ -1218,7 +1280,6 @@ async def test_cookie_with_playurl(retries: int = 2):
             )
         )
         return
-
     logger.info(f"🎬 Auto-testing cookies with PLAY_URL (retries left: {retries}) …")
     test_dir = os.path.join(os.getcwd(), "cookie_test")
     os.makedirs(test_dir, exist_ok=True)
@@ -1230,14 +1291,12 @@ async def test_cookie_with_playurl(retries: int = 2):
         },
         use_cookie_file=COOKIE_FILE if os.path.isfile(COOKIE_FILE) else None,
     )
-
     try:
         loop = asyncio.get_event_loop()
         async with DOWNLOAD_SEMAPHORE:
             with yt_dlp.YoutubeDL(test_opts) as ydl:
                 await loop.run_in_executor(
                     None, lambda: ydl.extract_info(PLAY_URL, download=True))
-
         file_path = None
         if video_id:
             for ext in ["mp3", "webm", "m4a", "opus", "mp4", "mkv"]:
@@ -1245,7 +1304,6 @@ async def test_cookie_with_playurl(retries: int = 2):
                 if os.path.exists(p):
                     file_path = p
                     break
-
         if not file_path and os.path.exists(test_dir):
             files = [
                 os.path.join(test_dir, f)
@@ -1254,7 +1312,6 @@ async def test_cookie_with_playurl(retries: int = 2):
             ]
             if files:
                 file_path = max(files, key=os.path.getmtime)
-
         if file_path and os.path.exists(file_path):
             size_kb = os.path.getsize(file_path) // 1024
             logger.info(f"✅ Cookie test PASSED — {file_path} ({size_kb} KB)")
@@ -1288,7 +1345,6 @@ async def test_cookie_with_playurl(retries: int = 2):
                 reason="PLAY_URL test: file not found")
             if new_cookie:
                 await test_cookie_with_playurl(retries=retries - 1)
-
     except Exception as e:
         err_str = str(e)
         logger.error(f"Cookie auto-test error: {err_str}")
@@ -1327,7 +1383,6 @@ async def test_cookie_with_playurl(retries: int = 2):
 # ══════════════════════════════════════════════════════════════════════════════
 #  UTILITY
 # ══════════════════════════════════════════════════════════════════════════════
-
 async def shell_cmd(cmd: str) -> str:
     proc = await asyncio.create_subprocess_shell(
         cmd,
@@ -1342,7 +1397,6 @@ async def shell_cmd(cmd: str) -> str:
         return decoded
     return out.decode("utf-8")
 
-
 async def check_file_size(link: str) -> Optional[int]:
     try:
         ydl_opts = get_ytdlp_opts(
@@ -1350,7 +1404,6 @@ async def check_file_size(link: str) -> Optional[int]:
             use_cookie_file=COOKIE_FILE if os.path.isfile(COOKIE_FILE) else None,
         )
         loop = asyncio.get_event_loop()
-
         def _get_size():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info  = ydl.extract_info(link, download=False)
@@ -1360,7 +1413,6 @@ async def check_file_size(link: str) -> Optional[int]:
                     if size:
                         total += size
                 return total
-
         return await asyncio.wait_for(
             loop.run_in_executor(None, _get_size), timeout=60)
     except Exception as e:
@@ -1370,9 +1422,7 @@ async def check_file_size(link: str) -> Optional[int]:
 # ══════════════════════════════════════════════════════════════════════════════
 #  COOKIE STARTUP HELPER
 # ══════════════════════════════════════════════════════════════════════════════
-
 async def _run_cookie_startup():
-    """Generate cookies + run PLAY_URL test. Only call on a confirmed good IP."""
     cleanup_playwright_profile()
     need = (
         not os.path.exists(COOKIE_FILE)
@@ -1397,25 +1447,20 @@ async def _run_cookie_startup():
             )
     else:
         logger.info("✅ Existing cookies valid — skipping regeneration.")
-
     logger.info("🎬 Running PLAY_URL startup test …")
     await test_cookie_with_playurl(retries=2)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  STARTUP
 # ══════════════════════════════════════════════════════════════════════════════
-
 async def startup_services():
     if not ENABLE_YT_COOKIES:
         logger.info("YouTube cookie handling disabled (ENABLE_YT_COOKIES=false).")
         return
-
     logger.info("🚀 Starting YouTube services …")
-
     good = await check_ip_quality()
     info = _CURRENT_IP_INFO
     timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-
     if not good:
         logger.warning(
             f"🚫 Amazon IP on startup — "
@@ -1439,7 +1484,6 @@ async def startup_services():
         )
         asyncio.create_task(_ip_watcher_loop())
         return
-
     logger.info(
         f"✅ Good IP on startup — "
         f"{info.get('org', 'unknown')} / {info.get('ip', 'unknown')}. "
@@ -1457,7 +1501,6 @@ async def startup_services():
             f"#GoodIP #Startup"
         )
     )
-
     await _run_cookie_startup()
     _good_ip_event().set()
     logger.info("✅ Startup complete — event set, downloads enabled.")
@@ -1466,7 +1509,6 @@ async def startup_services():
 # ══════════════════════════════════════════════════════════════════════════════
 #  YouTubeAPI CLASS
 # ══════════════════════════════════════════════════════════════════════════════
-
 class YouTubeAPI:
     def __init__(self):
         self.base     = "https://www.youtube.com/watch?v="
@@ -1575,7 +1617,6 @@ class YouTubeAPI:
         cf       = COOKIE_FILE if os.path.isfile(COOKIE_FILE) else None
         ydl_opts = get_ytdlp_opts({"quiet": True}, use_cookie_file=cf)
         loop     = asyncio.get_event_loop()
-
         def _get():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(link, download=False)
@@ -1594,7 +1635,6 @@ class YouTubeAPI:
                     except Exception:
                         pass
                 return out
-
         try:
             result = await asyncio.wait_for(
                 loop.run_in_executor(None, _get), timeout=60)
@@ -1643,7 +1683,7 @@ class YouTubeAPI:
     async def download(
         self,
         link:      str,
-        mystic,
+        mystic,                              # ← Telegram message for progress
         video:     Union[bool, str] = None,
         videoid:   Union[bool, str] = None,
         songaudio: Union[bool, str] = None,
@@ -1653,14 +1693,20 @@ class YouTubeAPI:
     ) -> tuple:
         if videoid:
             link = self.base + link
+        # Resolve display title for progress bar
+        display_title = str(title) if title else ""
+        if not display_title:
+            try:
+                display_title = await self.title(link) or ""
+            except Exception:
+                display_title = extract_video_id(link) or ""
         try:
             if songvideo or songaudio:
-                f = await download_song(link)
+                f = await download_song(link, mystic=mystic, title=display_title)
             elif video:
-                f = await download_video(link)
+                f = await download_video(link, mystic=mystic, title=display_title)
             else:
-                f = await download_song(link)
-
+                f = await download_song(link, mystic=mystic, title=display_title)
             if not f or not os.path.exists(f):
                 logger.error(f"download() — file missing: {f!r}")
                 return None, False
