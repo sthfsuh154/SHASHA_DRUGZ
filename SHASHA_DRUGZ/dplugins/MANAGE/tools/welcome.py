@@ -35,6 +35,16 @@ import time
 import aiohttp
 import requests
 import random
+import logging
+
+# ─────────────────────────────────────────────
+# Suppress pyrogram PEER_ID_INVALID noise
+# ─────────────────────────────────────────────
+class _PeerIdInvalidFilter(logging.Filter):
+    def filter(self, record):
+        return "PEER_ID_INVALID" not in record.getMessage()
+
+logging.getLogger("pyrogram.client").addFilter(_PeerIdInvalidFilter())
 
 # ─────────────────────────────────────────────
 # Logger
@@ -70,9 +80,7 @@ class WelDatabase:
         if chat_id in self.data:
             del self.data[chat_id]
 
-
 wlcm = WelDatabase()
-
 
 # ─────────────────────────────────────────────
 # Temp state
@@ -84,7 +92,6 @@ class temp:
     MELCOW = {}
     U_NAME = None
     B_NAME = None
-
 
 # ─────────────────────────────────────────────
 # Image helpers
@@ -99,7 +106,6 @@ def circle(pfp, size=(500, 500)):
     mask = ImageChops.darker(mask, pfp.split()[-1])
     pfp.putalpha(mask)
     return pfp
-
 
 def welcomepic(pic, user, chatname, id, uname, brightness_factor=1.3):
     background = Image.open("SHASHA_DRUGZ/assets/shasha/hb-welcome.jpg")
@@ -116,9 +122,7 @@ def welcomepic(pic, user, chatname, id, uname, brightness_factor=1.3):
     background.save(f"downloads/welcome#{id}.png")
     return f"downloads/welcome#{id}.png"
 
-
 def _is_valid_image(path: str) -> bool:
-    """Return True only if the file exists, is non-empty, and PIL can open it."""
     if not path or not os.path.exists(path):
         return False
     if os.path.getsize(path) == 0:
@@ -130,15 +134,9 @@ def _is_valid_image(path: str) -> bool:
     except Exception:
         return False
 
-
 async def _safe_download_profile_photo(user) -> str:
-    """
-    Download the user's profile photo and return its local path.
-    Falls back to the default asset if download fails or the file is corrupt.
-    """
     fallback = "SHASHA_DRUGZ/assets/upic.png"
     pic = None
-
     try:
         if not user.photo:
             return fallback
@@ -147,7 +145,6 @@ async def _safe_download_profile_photo(user) -> str:
             file_name=f"pp{user.id}.png",
         )
     except (FileReferenceExpired, FileReferenceInvalid):
-        # Reference stale — fetch a fresh one and retry once
         try:
             photos = await app.get_profile_photos(user.id, limit=1)
             if photos:
@@ -155,30 +152,21 @@ async def _safe_download_profile_photo(user) -> str:
                     photos[0].file_id,
                     file_name=f"pp{user.id}.png",
                 )
-        except Exception as e:
-            LOGGER.warning("Profile photo retry failed for %s: %s", user.id, e)
+        except Exception:
             return fallback
     except AttributeError:
-        # user.photo is None
         return fallback
-    except RPCError as e:
-        LOGGER.warning("Profile photo RPCError for %s: %s", user.id, e)
-        return fallback
-    except Exception as e:
-        LOGGER.warning("Profile photo unexpected error for %s: %s", user.id, e)
+    except (RPCError, Exception):
         return fallback
 
     if not _is_valid_image(pic):
-        # Downloaded file is corrupt/empty — clean up and use fallback
         if pic and os.path.exists(pic):
             try:
                 os.remove(pic)
             except OSError:
                 pass
         return fallback
-
     return pic
-
 
 # ─────────────────────────────────────────────
 # /welcome command
@@ -188,21 +176,17 @@ async def auto_state(client: Client, message: Message):
     usage = "**ᴜsᴀɢᴇ:**\n**⦿ /welcome [on|off]**"
     if len(message.command) == 1:
         return await message.reply_text(usage)
-
     chat_id = message.chat.id
-
     try:
         user = await app.get_chat_member(chat_id, message.from_user.id)
     except RPCError:
         return await message.reply_text("**ᴄᴏᴜʟᴅ ɴᴏᴛ ᴠᴇʀɪғʏ ᴀᴅᴍɪɴ sᴛᴀᴛᴜs.**")
-
     if user.status in (
         enums.ChatMemberStatus.ADMINISTRATOR,
         enums.ChatMemberStatus.OWNER,
     ):
         A = await wlcm.find_one(chat_id)
         state = message.text.split(None, 1)[1].strip().lower()
-
         if state == "off":
             if A:
                 await message.reply_text("**ᴡᴇʟᴄᴏᴍᴇ ɴᴏᴛɪғɪᴄᴀᴛɪᴏɴ ᴀʟʀᴇᴀᴅʏ ᴅɪsᴀʙʟᴇᴅ !**")
@@ -226,7 +210,6 @@ async def auto_state(client: Client, message: Message):
             "**sᴏʀʀʏ ᴏɴʟʏ ᴀᴅᴍɪɴs ᴄᴀɴ ᴇɴᴀʙʟᴇ ᴡᴇʟᴄᴏᴍᴇ ɴᴏᴛɪғɪᴄᴀᴛɪᴏɴ!**"
         )
 
-
 # ─────────────────────────────────────────────
 # New-member welcome handler
 # ─────────────────────────────────────────────
@@ -234,12 +217,12 @@ async def auto_state(client: Client, message: Message):
 async def greet_new_member(_, member: ChatMemberUpdated):
     chat_id = member.chat.id
 
-    # ── Check if welcome is disabled ────────────────────────────────────────
+    # ── Check if welcome is disabled ─────────────────────────────────────────
     A = await wlcm.find_one(chat_id)
     if A:
         return
 
-    # ── Only fire when a brand-new member joins (not promotions/demotions) ──
+    # ── Only fire when a brand-new member joins (not promotions/demotions) ───
     if not (member.new_chat_member and not member.old_chat_member):
         return
 
@@ -247,17 +230,12 @@ async def greet_new_member(_, member: ChatMemberUpdated):
         member.new_chat_member.user if member.new_chat_member else member.from_user
     )
 
-    # ── Get member count — safely guard against ChannelInvalid ──────────────
+    # ── Get member count — silently skip if peer not cached ──────────────────
     count = "N/A"
     try:
         count = await app.get_chat_members_count(chat_id)
     except (ChannelInvalid, PeerIdInvalid):
-        # Bot hasn't cached this peer yet. Count stays "N/A" and we continue.
-        LOGGER.warning(
-            "greet_new_member: peer not cached for get_chat_members_count "
-            "in chat %s — using fallback count",
-            chat_id,
-        )
+        pass  # peer not yet cached — count stays "N/A"
     except FloodWait as e:
         await asyncio.sleep(e.value)
         try:
@@ -327,20 +305,15 @@ async def greet_new_member(_, member: ChatMemberUpdated):
                 reply_markup=reply_markup,
             )
         else:
-            # Image generation failed — send text welcome instead
             temp.MELCOW[prev_key] = await app.send_message(
                 chat_id,
                 text=caption,
                 reply_markup=reply_markup,
             )
     except (ChannelInvalid, PeerIdInvalid):
-        LOGGER.warning(
-            "greet_new_member: peer not cached for send in chat %s", chat_id
-        )
+        pass  # peer not yet cached — silently skip
     except ChatWriteForbidden:
-        LOGGER.warning(
-            "greet_new_member: bot lacks send permission in chat %s", chat_id
-        )
+        pass  # bot lacks send permission — silently skip
     except FloodWait as e:
         await asyncio.sleep(e.value)
         try:
@@ -374,7 +347,6 @@ async def greet_new_member(_, member: ChatMemberUpdated):
                 os.remove(pic)
             except OSError:
                 pass
-
 
 # ─────────────────────────────────────────────
 # Module metadata
