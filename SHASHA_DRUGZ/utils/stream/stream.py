@@ -1,3 +1,4 @@
+import asyncio
 import os
 from random import randint
 from typing import Union
@@ -13,11 +14,107 @@ from SHASHA_DRUGZ.utils.exceptions import AssistantErr
 from SHASHA_DRUGZ.utils.inline import aq_markup, queuemarkup, close_markup, stream_markup, stream_markup2
 from SHASHA_DRUGZ.utils.pastebin import SHASHABin
 from SHASHA_DRUGZ.utils.stream.queue import put_queue, put_queue_index
-
-# USE CUSTOM DESIGNED THUMBNAIL
 from SHASHA_DRUGZ.utils.thumbnails import get_thumb
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Formats ntgcalls/pytgcalls can handle WITHOUT conversion
+# ─────────────────────────────────────────────────────────────────────────────
+NATIVE_VIDEO_EXTS = {"mp4", "m4v", "webm", "mov"}
+NATIVE_AUDIO_EXTS = {"mp3", "ogg", "opus", "m4a", "aac", "flac", "wav", "webm"}
+
+
+def _ext(path: str) -> str:
+    """Return lowercase extension without the dot."""
+    return os.path.splitext(path)[-1].lstrip(".").lower()
+
+
+async def ensure_compatible(file_path: str, video: bool = False) -> str:
+    """
+    Convert a media file to a pytgcalls-compatible format using FFmpeg
+    if its container is not natively supported.
+
+    - Video → MP4  (H.264 + AAC, fast copy when possible)
+    - Audio → MP3  (copy when possible)
+
+    Returns the (possibly new) file path. The original file is kept
+    so the download cache stays valid.
+    """
+    ext = _ext(file_path)
+    native = NATIVE_VIDEO_EXTS if video else NATIVE_AUDIO_EXTS
+
+    if ext in native:
+        return file_path  # nothing to do
+
+    out_ext = "mp4" if video else "mp3"
+    out_path = os.path.splitext(file_path)[0] + f"_converted.{out_ext}"
+
+    if os.path.exists(out_path):
+        return out_path  # already converted from a previous call
+
+    if video:
+        # Try stream-copy first (fastest, no quality loss).
+        # If the codec isn't H.264/AAC, re-encode transparently.
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", file_path,
+            "-c:v", "copy",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            out_path,
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", file_path,
+            "-vn",                 # drop video stream
+            "-c:a", "copy",        # copy audio if already MP3-compatible
+            out_path,
+        ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+
+    if proc.returncode != 0 or not os.path.exists(out_path):
+        # Stream-copy failed → try full re-encode
+        if video:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", file_path,
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "23",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-movflags", "+faststart",
+                out_path,
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", file_path,
+                "-vn",
+                "-c:a", "libmp3lame",
+                "-b:a", "128k",
+                out_path,
+            ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+
+    return out_path if os.path.exists(out_path) else file_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Main stream dispatcher
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def stream(
     _,
@@ -37,7 +134,7 @@ async def stream(
     if forceplay:
         await SHASHA.force_stop_stream(chat_id)
 
-    # ---------------- PLAYLIST -----------------------
+    # ── PLAYLIST ─────────────────────────────────────────────────────────────
     if streamtype == "playlist":
         msg = f"{_['play_19']}\n\n"
         count = 0
@@ -89,7 +186,6 @@ async def stream(
                 except:
                     raise AssistantErr(_["play_14"])
 
-                # USE CUSTOM THUMBNAIL
                 img = await get_thumb(vidid)
 
                 await SHASHA.join_call(
@@ -122,7 +218,7 @@ async def stream(
                         f"https://t.me/{app.username}?start=info_{vidid}",
                         title[:23],
                         duration_min,
-                        user_name
+                        user_name,
                     ),
                     reply_markup=InlineKeyboardMarkup(button),
                 )
@@ -151,13 +247,12 @@ async def stream(
             )
 
 
-    # ---------------- YOUTUBE DIRECT -----------------------
+    # ── YOUTUBE DIRECT ───────────────────────────────────────────────────────
     elif streamtype == "youtube":
         link = result["link"]
         vidid = result["vidid"]
         title = (result["title"]).title()
         duration_min = result["duration_min"]
-
         status = True if video else None
 
         try:
@@ -167,7 +262,6 @@ async def stream(
         except:
             raise AssistantErr(_["play_14"])
 
-        # GET CUSTOM THUMB
         img = await get_thumb(vidid)
 
         if await is_active_chat(chat_id):
@@ -189,7 +283,9 @@ async def stream(
             await app.send_photo(
                 chat_id=original_chat_id,
                 photo=img,
-                caption=_["queue_4"].format(position, title[:20], duration_min, user_name),
+                caption=_["queue_4"].format(
+                    position, title[:20], duration_min, user_name
+                ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
 
@@ -227,7 +323,7 @@ async def stream(
                     f"https://t.me/{app.username}?start=info_{vidid}",
                     title[:12],
                     duration_min,
-                    user_name
+                    user_name,
                 ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
@@ -236,8 +332,7 @@ async def stream(
             db[chat_id][0]["markup"] = "stream"
 
 
-    # ---------------- OTHER SOURCES BELOW (unchanged) ----------------
-
+    # ── SOUNDCLOUD ───────────────────────────────────────────────────────────
     elif streamtype == "soundcloud":
         file_path = result["filepath"]
         title = result["title"]
@@ -261,7 +356,9 @@ async def stream(
 
             await app.send_message(
                 chat_id=original_chat_id,
-                text=_["queue_4"].format(position, title[:12], duration_min, user_name),
+                text=_["queue_4"].format(
+                    position, title[:12], duration_min, user_name
+                ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
 
@@ -299,14 +396,18 @@ async def stream(
             db[chat_id][0]["markup"] = "tg"
 
 
-
+    # ── TELEGRAM ─────────────────────────────────────────────────────────────
     elif streamtype == "telegram":
         file_path = result["path"]
         link = result["link"]
         title = (result["title"]).title()
         duration_min = result["dur"]
-
         status = True if video else None
+
+        # ✅ FIX: convert MKV / AVI / WMV / FLV / etc. → MP4 (video)
+        #          or any non-native audio container → MP3
+        #         before handing the path to ntgcalls / pytgcalls.
+        file_path = await ensure_compatible(file_path, video=bool(video))
 
         if await is_active_chat(chat_id):
             await put_queue(
@@ -325,7 +426,9 @@ async def stream(
 
             await app.send_message(
                 chat_id=original_chat_id,
-                text=_["queue_4"].format(position, title[:12], duration_min, user_name),
+                text=_["queue_4"].format(
+                    position, title[:12], duration_min, user_name
+                ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
 
@@ -358,7 +461,9 @@ async def stream(
             run = await app.send_photo(
                 original_chat_id,
                 photo=config.TELEGRAM_VIDEO_URL if video else config.TELEGRAM_AUDIO_URL,
-                caption=_["stream_1"].format(link, title[:12], duration_min, user_name),
+                caption=_["stream_1"].format(
+                    link, title[:12], duration_min, user_name
+                ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
 
@@ -366,13 +471,12 @@ async def stream(
             db[chat_id][0]["markup"] = "tg"
 
 
-
+    # ── LIVE ─────────────────────────────────────────────────────────────────
     elif streamtype == "live":
         link = result["link"]
         vidid = result["vidid"]
         title = (result["title"]).title()
         duration_min = "Live Track"
-
         status = True if video else None
 
         if await is_active_chat(chat_id):
@@ -393,7 +497,9 @@ async def stream(
 
             await app.send_message(
                 chat_id=original_chat_id,
-                text=_["queue_4"].format(position, title[:12], duration_min, user_name),
+                text=_["queue_4"].format(
+                    position, title[:12], duration_min, user_name
+                ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
 
@@ -405,7 +511,6 @@ async def stream(
             if n == 0:
                 raise AssistantErr(_["str_3"])
 
-            # CUSTOM THUMBNAIL
             img = await get_thumb(vidid)
 
             await SHASHA.join_call(
@@ -447,7 +552,7 @@ async def stream(
             db[chat_id][0]["markup"] = "tg"
 
 
-
+    # ── INDEX / M3U8 ─────────────────────────────────────────────────────────
     elif streamtype == "index":
         link = result
         title = "ɪɴᴅᴇx ᴏʀ ᴍ3ᴜ8 ʟɪɴᴋ"
@@ -469,7 +574,9 @@ async def stream(
             button = aq_markup(_, chat_id)
 
             await mystic.edit_text(
-                text=_["queue_4"].format(position, title[:27], duration_min, user_name),
+                text=_["queue_4"].format(
+                    position, title[:27], duration_min, user_name
+                ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
 
@@ -508,4 +615,3 @@ async def stream(
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
             await mystic.delete()
-
