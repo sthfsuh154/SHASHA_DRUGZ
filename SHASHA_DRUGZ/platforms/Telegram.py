@@ -108,7 +108,6 @@ DOCUMENT_AUDIO_EXTS = {
     "wma", "aiff", "aif", "amr", "awb", "3gp", "3g2", "ape",
     "dsd", "tta", "wv", "spx", "mid", "midi", "ra", "au",
 }
-
 DOCUMENT_VIDEO_EXTS = {
     "mp4", "mkv", "webm", "avi", "mov", "wmv", "flv", "mpeg",
     "mpg", "3gp", "3g2", "ogv", "ts", "mxf", "asf", "divx",
@@ -250,6 +249,7 @@ class TeleAPI:
                           awb 3gp 3g2 ape dsd tta wv spx mid ra au
         Supported video : mp4 mkv webm avi mov wmv flv mpeg mpg 3gp 3g2
                           ogv ts mxf asf divx rv h264 hevc m2ts vob m4v
+
         Voice messages  : always saved as .ogg
 
         NOTE: ensure_compatible() in stream.py will re-encode to H.264+AAC
