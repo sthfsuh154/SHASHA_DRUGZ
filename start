@@ -1,28 +1,98 @@
 #!/usr/bin/env bash
-set -e
+# ─────────────────────────────────────────────────────────────
+#  Startup script for Railway deployment
+#  Manages: bgutil server (TypeScript/tsx) + Python bot
+# ─────────────────────────────────────────────────────────────
+set -euo pipefail
 
-echo "Checking Chromium installation..."
-if [ ! -d "/ms-playwright" ]; then
-    echo "Chromium not found. Installing..."
+# ── 1. Chromium check ─────────────────────────────────────────
+echo "[start] Checking Chromium installation..."
+if [ ! -d "/ms-playwright" ] || [ -z "$(ls -A /ms-playwright 2>/dev/null)" ]; then
+    echo "[start] Chromium not found — installing now..."
     playwright install chromium
 else
-    echo "Chromium already installed. Skipping."
+    echo "[start] Chromium found. Skipping install."
 fi
 
-echo "Starting bgutil server (src/main.ts via tsx)..."
-# v1.3.1+ is a pure-ESM TypeScript project with no compile step.
-# tsx handles ESM TypeScript natively without any register flags.
-"$BGUTIL_SERVER_HOME/node_modules/.bin/tsx" \
-    "$BGUTIL_SERVER_HOME/src/main.ts" &
+# ── 2. Validate bgutil entry point ───────────────────────────
+BGUTIL_MAIN="$BGUTIL_SERVER_HOME/src/main.ts"
+BGUTIL_TSX="$BGUTIL_SERVER_HOME/node_modules/.bin/tsx"
+
+if [ ! -f "$BGUTIL_MAIN" ]; then
+    echo "[start] ERROR: bgutil entry point not found: $BGUTIL_MAIN"
+    exit 1
+fi
+
+if [ ! -f "$BGUTIL_TSX" ]; then
+    echo "[start] ERROR: tsx not found: $BGUTIL_TSX"
+    exit 1
+fi
+
+# ── 3. Start bgutil server in background ─────────────────────
+echo "[start] Starting bgutil server..."
+"$BGUTIL_TSX" "$BGUTIL_MAIN" &
 BGUTIL_PID=$!
 
-echo "Waiting for bgutil to be ready..."
-sleep 5
+# Immediately verify the process actually launched
+sleep 1
+if ! kill -0 "$BGUTIL_PID" 2>/dev/null; then
+    echo "[start] ERROR: bgutil failed to start (PID $BGUTIL_PID already dead)."
+    exit 1
+fi
+echo "[start] bgutil running (PID $BGUTIL_PID)."
 
-echo "Starting bot..."
+# ── 4. Wait for bgutil HTTP port to be ready ─────────────────
+#  Polls the bgutil health endpoint instead of blind sleep.
+#  Adjust port if your bgutil config uses a different one.
+BGUTIL_PORT="${BGUTIL_PORT:-4416}"
+MAX_WAIT=30   # seconds
+WAITED=0
+
+echo "[start] Waiting for bgutil on port $BGUTIL_PORT..."
+until curl -sf "http://localhost:$BGUTIL_PORT" > /dev/null 2>&1; do
+    # Bail out if bgutil process died while we were waiting
+    if ! kill -0 "$BGUTIL_PID" 2>/dev/null; then
+        echo "[start] ERROR: bgutil process died while waiting for it to be ready."
+        exit 1
+    fi
+
+    if [ "$WAITED" -ge "$MAX_WAIT" ]; then
+        echo "[start] ERROR: bgutil did not become ready within ${MAX_WAIT}s."
+        kill "$BGUTIL_PID" 2>/dev/null || true
+        exit 1
+    fi
+
+    sleep 1
+    WAITED=$((WAITED + 1))
+done
+
+echo "[start] bgutil ready after ${WAITED}s."
+
+# ── 5. Monitor bgutil in background — restart container if it crashes ──
+# Railway will restart the whole container on exit, so exiting here is correct.
+(
+    while true; do
+        sleep 10
+        if ! kill -0 "$BGUTIL_PID" 2>/dev/null; then
+            echo "[monitor] bgutil process died unexpectedly. Killing bot to trigger Railway restart..."
+            # Kill the main process group so Railway restarts everything cleanly
+            kill -TERM 0 2>/dev/null || true
+            exit 1
+        fi
+    done
+) &
+MONITOR_PID=$!
+
+# ── 6. Start the bot ─────────────────────────────────────────
+echo "[start] Starting bot (SHASHA_DRUGZ)..."
 python3 -m SHASHA_DRUGZ
+BOT_EXIT=$?
 
-echo "Stopping bgutil server..."
-kill $BGUTIL_PID 2>/dev/null || true
-wait $BGUTIL_PID 2>/dev/null || true
+# ── 7. Graceful shutdown ──────────────────────────────────────
+echo "[start] Bot exited (code $BOT_EXIT). Shutting down bgutil..."
+kill "$MONITOR_PID" 2>/dev/null || true
+kill "$BGUTIL_PID"  2>/dev/null || true
+wait "$BGUTIL_PID"  2>/dev/null || true
 
+echo "[start] All processes stopped."
+exit $BOT_EXIT
