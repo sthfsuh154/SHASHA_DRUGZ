@@ -1,6 +1,5 @@
 # ══════════════════════════════════════════════════════════
 #  STAGE 1 — builder
-#  Heavy installs: Python deps, Playwright browser, bgutil
 # ══════════════════════════════════════════════════════════
 FROM python:3.10-slim-bookworm AS builder
 
@@ -9,14 +8,10 @@ ENV PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# Build-time system tools only
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl git ca-certificates gnupg \
-        # Needed to compile some pip packages (aiohttp, cryptography, etc.)
         gcc g++ libffi-dev libssl-dev \
-        # Needed by Pillow at build time
         libjpeg-dev zlib1g-dev \
-        # Needed by lxml / beautifulsoup4
         libxml2-dev libxslt1-dev \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
@@ -25,9 +20,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# ── Python packages ───────────────────────────────────────
 COPY requirements.txt .
 
+# ── Python packages (installed to /install prefix) ────────
 RUN pip install --upgrade pip --no-cache-dir \
     && pip install --prefix=/install --no-cache-dir -r requirements.txt \
     && pip install --prefix=/install --no-cache-dir \
@@ -35,7 +30,6 @@ RUN pip install --upgrade pip --no-cache-dir \
          playwright \
          playwright-stealth \
          camoufox \
-    # Strip test/docs folders from every installed package
     && find /install -depth \
          \( -type d \( -name "tests" -o -name "test" \
                     -o -name "docs"  -o -name "examples" \) \) \
@@ -43,13 +37,14 @@ RUN pip install --upgrade pip --no-cache-dir \
     && find /install -name "*.pyc" -delete 2>/dev/null || true \
     && rm -rf /tmp/*
 
-# ── Playwright: Chromium only ─────────────────────────────
+# ── Playwright: Chromium only ──────────────────────────────
+# PYTHONPATH must point to /install so python can find playwright
 RUN PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PYTHONPATH=/install/lib/python3.10/site-packages \
     python -m playwright install chromium \
     && rm -rf /tmp/*
 
-# ── bgutil server ─────────────────────────────────────────
-# tsx is a devDependency but REQUIRED at runtime — it executes src/main.ts directly
+# ── bgutil server ──────────────────────────────────────────
 RUN git clone --single-branch --depth 1 \
         https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \
         /build/bgutil-ytdlp-pot-provider \
@@ -63,7 +58,6 @@ RUN git clone --single-branch --depth 1 \
     && test -f node_modules/.bin/tsx \
         || (echo "ERROR: tsx missing!" && exit 1) \
     && echo "OK: bgutil verified."
-
 
 # ══════════════════════════════════════════════════════════
 #  STAGE 2 — final runtime image
@@ -80,20 +74,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     NODE_ENV=production
 
 RUN apt-get update \
-    # ── Node.js 20 LTS via NodeSource (apt ships v18 which is too old) ──
     && apt-get install -y --no-install-recommends ca-certificates gnupg curl \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    # ── Media tools ────────────────────────────────────────────────────
     && apt-get install -y --no-install-recommends \
         ffmpeg \
         mpv \
         libsndfile1 \
-    # ── OpenCV / MoviePy runtime ────────────────────────────────────────
     && apt-get install -y --no-install-recommends \
         libglib2.0-0 \
         libgl1 \
-    # ── Playwright / Chromium runtime libs ──────────────────────────────
     && apt-get install -y --no-install-recommends \
         libnss3 libnspr4 \
         libatk1.0-0 libatk-bridge2.0-0 \
@@ -105,17 +95,13 @@ RUN apt-get update \
         libgtk-3-0 \
         libx11-xcb1 libxcb-dri3-0 libxext6 \
         fonts-liberation \
-    # ── py-tgcalls / voice chat audio ───────────────────────────────────
     && apt-get install -y --no-install-recommends \
         libopus0 libopus-dev \
-    # ── Pillow runtime ───────────────────────────────────────────────────
     && apt-get install -y --no-install-recommends \
         libjpeg62-turbo \
         zlib1g \
-    # ── gitpython needs git at runtime ──────────────────────────────────
     && apt-get install -y --no-install-recommends \
         git \
-    # ── Cleanup: remove bootstrap tools, purge apt caches ───────────────
     && apt-get purge -y curl gnupg \
     && apt-get autoremove -y \
     && apt-get clean \
@@ -125,7 +111,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# ── Copy only the built artifacts from builder stage ─────
+# ── Copy built artifacts from builder ────────────────────
 COPY --from=builder /install                          /usr/local
 COPY --from=builder /ms-playwright                    /ms-playwright
 COPY --from=builder /build/bgutil-ytdlp-pot-provider  /app/bgutil-ytdlp-pot-provider
@@ -134,7 +120,6 @@ COPY --from=builder /build/bgutil-ytdlp-pot-provider  /app/bgutil-ytdlp-pot-prov
 COPY . .
 
 RUN chmod +x start \
-    # Strip leftover pyc / __pycache__ from copied packages and app code
     && find /usr/local/lib/python3.10 -depth \
          \( -type d \( -name "tests" -o -name "test" \) \) \
          -exec rm -rf '{}' + 2>/dev/null || true \
