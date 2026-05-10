@@ -35,12 +35,12 @@ if ! kill -0 "$BGUTIL_PID" 2>/dev/null; then
 fi
 echo "[start] bgutil running (PID $BGUTIL_PID)."
 
-# ── 4. Wait for bgutil HTTP port ──────────────────────────
+# ── 4. Wait for bgutil port — pure bash TCP check (no curl needed) ───
 BGUTIL_PORT="${BGUTIL_PORT:-4416}"
 MAX_WAIT=30
 WAITED=0
 echo "[start] Waiting for bgutil on port $BGUTIL_PORT..."
-until curl -sf "http://localhost:$BGUTIL_PORT" > /dev/null 2>&1; do
+until bash -c "echo > /dev/tcp/127.0.0.1/$BGUTIL_PORT" 2>/dev/null; do
     if ! kill -0 "$BGUTIL_PID" 2>/dev/null; then
         echo "[start] ERROR: bgutil died while waiting."
         exit 1
