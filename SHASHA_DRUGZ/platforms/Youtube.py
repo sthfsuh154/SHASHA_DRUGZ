@@ -695,6 +695,20 @@ def is_live_url(url: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 #  YT-DLP OPTIONS BUILDER
 # ══════════════════════════════════════════════════════════════════════════════
+def _playwright_profile_has_cookies() -> bool:
+    """
+    Return True only if the Playwright profile directory contains a real
+    Chromium cookies database that yt-dlp can read.
+    Prevents the 'could not find chrome cookies database' crash.
+    """
+    # Chromium stores cookies in one of these paths inside the profile dir
+    candidates = [
+        os.path.join(PLAYWRIGHT_PROFILE_DIR, "Default", "Cookies"),
+        os.path.join(PLAYWRIGHT_PROFILE_DIR, "Cookies"),
+    ]
+    return any(os.path.isfile(p) and os.path.getsize(p) > 0 for p in candidates)
+
+
 def get_ytdlp_opts(
     extra_opts: dict = None,
     use_cookie_file: str = None,
@@ -720,11 +734,17 @@ def get_ytdlp_opts(
         },
     }
     if use_cookie_file and os.path.isfile(use_cookie_file):
+        # Best case: we have a valid Netscape cookie file
         base["cookiefile"] = use_cookie_file
         logger.debug(f"Using cookiefile: {use_cookie_file}")
-    else:
+    elif _playwright_profile_has_cookies():
+        # Browser profile exists and has a real Cookies DB — safe to use
         base["cookiesfrombrowser"] = ("chrome", PLAYWRIGHT_PROFILE_DIR)
-        logger.debug("Falling back to cookiesfrombrowser with persistent profile")
+        logger.debug("Using cookiesfrombrowser with persistent profile")
+    else:
+        # No cookies available yet — proceed without; yt-dlp will try anyway
+        # and cookie regen will be triggered on auth errors downstream.
+        logger.debug("No cookie source available — proceeding without cookies")
     proxy = choose_random_proxy(YTDLP_PROXY_POOL)
     if proxy:
         base["proxy"] = proxy
