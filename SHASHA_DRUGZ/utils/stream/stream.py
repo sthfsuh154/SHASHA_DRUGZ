@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from random import randint
 from typing import Union
@@ -18,60 +19,125 @@ from SHASHA_DRUGZ.utils.thumbnails import get_thumb
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Formats ntgcalls/pytgcalls can handle WITHOUT conversion
+#  ntgcalls ONLY supports these codecs — anything else must be re-encoded
 # ─────────────────────────────────────────────────────────────────────────────
-NATIVE_VIDEO_EXTS = {"mp4", "m4v", "webm", "mov"}
-NATIVE_AUDIO_EXTS = {"mp3", "ogg", "opus", "m4a", "aac", "flac", "wav", "webm"}
+SUPPORTED_VIDEO_CODECS = {"h264"}
+SUPPORTED_AUDIO_CODECS = {"aac"}
 
 
-def _ext(path: str) -> str:
-    """Return lowercase extension without the dot."""
-    return os.path.splitext(path)[-1].lstrip(".").lower()
+async def _probe(file_path: str) -> dict:
+    """
+    Run ffprobe on the file and return the actual codec names.
+    Returns: { "video_codec": str|None, "audio_codec": str|None }
+    """
+    cmd = [
+        "ffprobe",
+        "-v", "quiet",
+        "-print_format", "json",
+        "-show_streams",
+        file_path,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+
+    result = {"video_codec": None, "audio_codec": None}
+    try:
+        data = json.loads(stdout)
+        for s in data.get("streams", []):
+            ctype = s.get("codec_type", "")
+            cname = s.get("codec_name", "").lower()
+            if ctype == "video" and result["video_codec"] is None:
+                result["video_codec"] = cname
+            elif ctype == "audio" and result["audio_codec"] is None:
+                result["audio_codec"] = cname
+    except Exception:
+        pass
+
+    return result
 
 
 async def ensure_compatible(file_path: str, video: bool = False) -> str:
     """
-    Convert a media file to a pytgcalls-compatible format using FFmpeg
-    if its container is not natively supported.
+    Inspect the ACTUAL codec inside the file using ffprobe (not the extension).
+    Re-encode only what ntgcalls cannot handle:
 
-    - Video → MP4  (H.264 + AAC, fast copy when possible)
-    - Audio → MP3  (copy when possible)
+        Video mode → H.264 + AAC inside MP4
+        Audio mode → AAC inside M4A  (no video track)
 
-    Returns the (possibly new) file path. The original file is kept
-    so the download cache stays valid.
+    Handles ALL of these automatically:
+        H.265 / HEVC, VP9, VP8, AV1, MPEG-4, DivX   → re-encode to H.264
+        MP3-in-MP4, Opus-in-MP4, Vorbis, FLAC, PCM  → re-encode to AAC
+        MKV, AVI, WMV, FLV, MOV, TS, WEBM containers → remux/re-encode to MP4
+        Already H.264 + AAC in MP4                   → returned as-is instantly
+
+    The output file is cached (_compat suffix) so repeated plays are free.
+    If ffmpeg fails for any reason the original path is returned so the bot
+    does not crash — it may just not play that file.
     """
-    ext = _ext(file_path)
-    native = NATIVE_VIDEO_EXTS if video else NATIVE_AUDIO_EXTS
-
-    if ext in native:
-        return file_path  # nothing to do
-
-    out_ext = "mp4" if video else "mp3"
-    out_path = os.path.splitext(file_path)[0] + f"_converted.{out_ext}"
-
-    if os.path.exists(out_path):
-        return out_path  # already converted from a previous call
+    info = await _probe(file_path)
+    v_codec = info["video_codec"]   # e.g. "hevc", "vp9", "h264", None
+    a_codec = info["audio_codec"]   # e.g. "mp3", "opus", "aac", None
 
     if video:
-        # Try stream-copy first (fastest, no quality loss).
-        # If the codec isn't H.264/AAC, re-encode transparently.
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", file_path,
-            "-c:v", "copy",
-            "-c:a", "copy",
-            "-movflags", "+faststart",
-            out_path,
-        ]
-    else:
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", file_path,
-            "-vn",                 # drop video stream
-            "-c:a", "copy",        # copy audio if already MP3-compatible
-            out_path,
-        ]
+        # ── VIDEO MODE ─────────────────────────────────────────────────────
+        needs_v = (v_codec is not None) and (v_codec not in SUPPORTED_VIDEO_CODECS)
+        needs_a = (a_codec is not None) and (a_codec not in SUPPORTED_AUDIO_CODECS)
+        no_vid  = v_codec is None
+        is_mp4  = file_path.lower().endswith(".mp4")
 
+        # Perfect file: H.264 + AAC already in an MP4 container
+        if is_mp4 and not needs_v and not needs_a and not no_vid:
+            return file_path
+
+        out_path = os.path.splitext(file_path)[0] + "_compat.mp4"
+        if os.path.exists(out_path):
+            return out_path
+
+        cmd = ["ffmpeg", "-y", "-i", file_path]
+
+        if no_vid:
+            # Audio-only file requested in video mode → add black video canvas
+            cmd += [
+                "-f", "lavfi",
+                "-i", "color=c=black:s=1280x720:r=24",
+                "-shortest",
+            ]
+
+        v_flag = "copy" if (not needs_v and not no_vid) else "libx264"
+        a_flag = "copy" if not needs_a else "aac"
+
+        cmd += ["-c:v", v_flag, "-c:a", a_flag]
+
+        if v_flag == "libx264":
+            cmd += ["-preset", "ultrafast", "-crf", "23"]
+        if a_flag == "aac":
+            cmd += ["-b:a", "128k"]
+
+        cmd += ["-movflags", "+faststart", out_path]
+
+    else:
+        # ── AUDIO MODE ─────────────────────────────────────────────────────
+        needs_a  = (a_codec is not None) and (a_codec not in SUPPORTED_AUDIO_CODECS)
+        is_native = file_path.lower().endswith((".m4a", ".aac")) and not needs_a
+
+        if is_native:
+            return file_path
+
+        out_path = os.path.splitext(file_path)[0] + "_compat.m4a"
+        if os.path.exists(out_path):
+            return out_path
+
+        a_flag = "copy" if not needs_a else "aac"
+        cmd = ["ffmpeg", "-y", "-i", file_path, "-vn", "-c:a", a_flag]
+        if a_flag == "aac":
+            cmd += ["-b:a", "128k"]
+        cmd.append(out_path)
+
+    # ── Run ffmpeg ──────────────────────────────────────────────────────────
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.DEVNULL,
@@ -80,36 +146,10 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
     _, stderr = await proc.communicate()
 
     if proc.returncode != 0 or not os.path.exists(out_path):
-        # Stream-copy failed → try full re-encode
-        if video:
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", file_path,
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-crf", "23",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-movflags", "+faststart",
-                out_path,
-            ]
-        else:
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", file_path,
-                "-vn",
-                "-c:a", "libmp3lame",
-                "-b:a", "128k",
-                out_path,
-            ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
+        print(f"[ensure_compatible] ffmpeg error for {file_path}:\n{stderr.decode()}")
+        return file_path   # fall back — bot won't crash
 
-    return out_path if os.path.exists(out_path) else file_path
+    return out_path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -398,15 +438,27 @@ async def stream(
 
     # ── TELEGRAM ─────────────────────────────────────────────────────────────
     elif streamtype == "telegram":
-        file_path = result["path"]
-        link = result["link"]
-        title = (result["title"]).title()
+        file_path    = result["path"]
+        link         = result["link"]
+        title        = (result["title"]).title()
         duration_min = result["dur"]
-        status = True if video else None
+        status       = True if video else None
 
-        # ✅ FIX: convert MKV / AVI / WMV / FLV / etc. → MP4 (video)
-        #          or any non-native audio container → MP3
-        #         before handing the path to ntgcalls / pytgcalls.
+        # ✅ THE FIX — ffprobe reads the real codec, not just the extension.
+        #
+        #   Codec map → what gets re-encoded:
+        #   ┌──────────────────────┬────────────────────────────────┐
+        #   │ Input codec          │ Action                         │
+        #   ├──────────────────────┼────────────────────────────────┤
+        #   │ H.264 + AAC in MP4   │ pass-through (zero cost)       │
+        #   │ H.265 / HEVC         │ re-encode video → libx264      │
+        #   │ VP9 / VP8 / AV1      │ re-encode video → libx264      │
+        #   │ MPEG-4 / DivX / Xvid │ re-encode video → libx264      │
+        #   │ MP3 inside MP4/MKV   │ re-encode audio → aac          │
+        #   │ Opus / Vorbis / FLAC │ re-encode audio → aac          │
+        #   │ Any non-MP4 container│ remux / re-encode → .mp4       │
+        #   │ Audio-only file      │ adds black canvas (video mode) │
+        #   └──────────────────────┴────────────────────────────────┘
         file_path = await ensure_compatible(file_path, video=bool(video))
 
         if await is_active_chat(chat_id):
