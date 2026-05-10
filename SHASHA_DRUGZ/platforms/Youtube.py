@@ -1276,49 +1276,137 @@ async def download_song_stream(
         return None, None
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ██╗     ██╗██╗   ██╗███████╗    ███████╗████████╗██████╗ ███████╗ █████╗ ███╗   ███╗
-#  ██║     ██║██║   ██║██╔════╝    ██╔════╝╚══██╔══╝██╔══██╗██╔════╝██╔══██╗████╗ ████║
-#  ██║     ██║██║   ██║█████╗      ███████╗   ██║   ██████╔╝█████╗  ███████║██╔████╔██║
-#  ██║     ██║╚██╗ ██╔╝██╔══╝      ╚════██║   ██║   ██╔══██╗██╔══╝  ██╔══██║██║╚██╔╝██║
-#  ███████╗██║ ╚████╔╝ ███████╗    ███████║   ██║   ██║  ██║███████╗██║  ██║██║ ╚═╝ ██║
-#  ╚══════╝╚═╝  ╚═══╝  ╚══════╝    ╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝
-#
-#  live_stream(link, video) → returns direct HLS/manifest URL (str) for pytgcalls
-#
-#  How it works:
-#    1. yt-dlp extracts info WITHOUT downloading (download=False)
-#    2. For audio-only:  picks the best audio-only format URL
-#       For video+audio: picks the best combined / merged format URL
-#    3. Returns the raw streaming URL — pytgcalls uses it directly as a live feed
-#    4. Infinite cookie regen on auth/bot errors (same pattern as download_with_ytdlp)
-#
-#  Called by Live.py → stream(..., streamtype="live")
-#  The `track()` method returns duration_min=None for live streams,
-#  which Live.py checks before calling stream().
+#  LIVE STREAM — INTERNAL URL PICKER
 # ══════════════════════════════════════════════════════════════════════════════
-async def live_stream(
+def _pick_stream_url(info: dict, video: bool) -> Optional[str]:
+    """
+    Given a yt-dlp info dict, return the best direct streaming URL.
+    Tries top-level 'url' first, then walks the formats list.
+    """
+    # Top-level shortcut (common for live streams)
+    if info.get("url"):
+        return info["url"]
+
+    formats = info.get("formats") or []
+    if not formats:
+        return None
+
+    if video:
+        # Prefer combined video+audio streams
+        candidates = [
+            f for f in formats
+            if f.get("vcodec") not in (None, "none")
+            and f.get("acodec") not in (None, "none")
+            and f.get("url")
+        ]
+        if not candidates:
+            candidates = [f for f in formats if f.get("url")]
+        candidates.sort(
+            key=lambda f: f.get("tbr") or f.get("abr") or 0, reverse=True)
+    else:
+        # Prefer audio-only; m4a/mp4a best for pytgcalls
+        candidates = [
+            f for f in formats
+            if f.get("vcodec") in (None, "none")
+            and f.get("acodec") not in (None, "none")
+            and f.get("url")
+        ]
+        if not candidates:
+            candidates = [f for f in formats if f.get("url")]
+        candidates.sort(
+            key=lambda f: f.get("abr") or f.get("tbr") or 0, reverse=True)
+
+    return candidates[0]["url"] if candidates else None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  LIVE STREAM — METHOD 1: API
+#  Asks the configured API for a live stream URL.
+#  The API is expected to return { "stream_url": "https://…" } or
+#  fall back to the same download_url / token pattern used for VODs.
+# ══════════════════════════════════════════════════════════════════════════════
+async def _live_stream_via_api(
+    video_id: str,
+    video: bool = False,
+) -> Optional[str]:
+    """
+    Try the external API for a live stream URL.
+    Returns a direct HLS/manifest URL string, or None on any failure.
+    """
+    if not API_URL:
+        return None
+
+    media_type = "livestream_video" if video else "livestream_audio"
+    headers    = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["X-API-KEY"] = API_KEY
+
+    logger.info(f"📡 [live/API] Trying API for live stream: {video_id} | type={media_type}")
+
+    for attempt in range(1, MAX_API_RETRIES + 1):
+        try:
+            async with aiohttp.ClientSession() as session:
+                params = {"url": video_id, "type": media_type}
+                async with session.get(
+                    f"{API_URL}/download",
+                    params=params,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status != 200:
+                        raise ValueError(f"API /download → HTTP {resp.status}")
+                    data = await resp.json()
+
+            # The API may return a direct stream_url (preferred for live)
+            stream_url = data.get("stream_url") or data.get("hls_url")
+
+            # Or fall back to download_url / token pattern used for VODs
+            if not stream_url:
+                token  = data.get("download_token") or data.get("token")
+                dl_url = data.get("download_url") or (
+                    f"{API_URL}/stream/{video_id}?type={media_type}&token={token}"
+                    if token else None
+                )
+                if dl_url:
+                    stream_url = dl_url if dl_url.startswith("http") else API_URL + dl_url
+
+            if not stream_url:
+                raise ValueError("No stream URL in API response")
+
+            logger.info(f"✅ [live/API] Got stream URL from API")
+            return stream_url
+
+        except Exception as exc:
+            logger.warning(
+                f"[live/API] Attempt {attempt}/{MAX_API_RETRIES} failed: {exc}")
+            if attempt < MAX_API_RETRIES:
+                await asyncio.sleep(2 * attempt)
+
+    logger.warning("[live/API] All API attempts failed — falling back to yt-dlp")
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  LIVE STREAM — METHOD 2: YT-DLP WITH COOKIE FILE / COOKIE REGEN
+#
+#  Chain of cookie sources (same priority as download_with_ytdlp):
+#    1. cookies.txt  (COOKIE_FILE) — generated by Playwright / supplied manually
+#    2. Browser profile DB         — only if it exists on disk
+#    3. No cookies                 — yt-dlp tries anyway; auth error → regen
+#
+#  On auth/bot error → infinite cookie regen (same pattern as VOD downloads).
+# ══════════════════════════════════════════════════════════════════════════════
+async def _live_stream_via_ytdlp(
     link: str,
     video: bool = False,
 ) -> Optional[str]:
     """
-    Resolve a YouTube live stream URL to a direct HLS/manifest URL.
-
-    Parameters
-    ----------
-    link  : full YouTube URL  (e.g. https://www.youtube.com/live/CMOm2KSl1Uo)
-    video : True  → return best video+audio stream URL
-            False → return best audio-only stream URL
-
-    Returns
-    -------
-    str   : direct streaming URL ready for pytgcalls / FFmpeg
-    None  : on failure
+    Resolve a YouTube live stream to a direct HLS/manifest URL using yt-dlp.
+    Uses cookies.txt when available, regenerates on auth errors, never downloads.
     """
-    logger.info(f"📡 [live_stream] Resolving live URL: {link} | video={video}")
-
     if is_blocked_ip():
         info = _CURRENT_IP_INFO
-        logger.warning("🚫 Live stream queued — waiting for non-Amazon IP …")
+        logger.warning("🚫 Live stream (yt-dlp) queued — waiting for non-Amazon IP …")
         await send_to_log_group(
             text=(
                 f"🚫 **Live Stream Queued — Amazon/AWS IP**\n\n"
@@ -1330,34 +1418,29 @@ async def live_stream(
         )
         await wait_for_good_ip()
 
+    # ── Prefer cookies.txt; fall back to profile DB or nothing ────────────
     cookie_file  = await get_cookies()
     loop         = asyncio.get_event_loop()
     cookie_cycle = 0
 
-    while True:
-        # ── Pick format selector ──────────────────────────────────────────
-        if video:
-            # Best combined stream; fallback to best overall
-            fmt_selector = "bv*+ba/b/best"
-        else:
-            # Best audio-only; prefer m4a/mp4a for pytgcalls compatibility
-            fmt_selector = "bestaudio[ext=m4a]/bestaudio/best"
+    fmt_selector = "bv*+ba/b/best" if video else "bestaudio[ext=m4a]/bestaudio/best"
 
-        cf       = cookie_file if (cookie_file and os.path.isfile(cookie_file)) else None
+    while True:
+        cf = cookie_file if (cookie_file and os.path.isfile(cookie_file)) else None
         ydl_opts = get_ytdlp_opts(
             {
-                "format":       fmt_selector,
-                "quiet":        True,
-                "no_warnings":  True,
-                # Do NOT download — just extract the URL
-                "skip_download": True,
+                "format":        fmt_selector,
+                "quiet":         True,
+                "no_warnings":   True,
+                "skip_download": True,   # URL extraction only — never writes a file
             },
             use_cookie_file=cf,
         )
 
         logger.info(
-            f"📡 [live_stream] Extracting info | cookie_cycle={cookie_cycle} | "
-            f"video={video}"
+            f"📡 [live/yt-dlp] Extracting info | "
+            f"cookie_file={'yes' if cf else 'no'} | "
+            f"cookie_cycle={cookie_cycle} | video={video}"
         )
         try:
             def _extract():
@@ -1372,90 +1455,33 @@ async def live_stream(
             if not info:
                 raise RuntimeError("yt-dlp returned no info for live stream.")
 
-            # ── Pull the stream URL out of the result ─────────────────────
-            stream_url = None
-
-            # For live streams yt-dlp often exposes a single "url" at top level
-            if info.get("url"):
-                stream_url = info["url"]
-
-            # Otherwise check formats list — pick the best matching one
-            if not stream_url and info.get("formats"):
-                formats = info["formats"]
-                if video:
-                    # Prefer formats that have both video and audio
-                    combined = [
-                        f for f in formats
-                        if f.get("vcodec") not in (None, "none")
-                        and f.get("acodec") not in (None, "none")
-                        and f.get("url")
-                    ]
-                    if combined:
-                        # Highest tbr (total bitrate) wins
-                        combined.sort(
-                            key=lambda f: f.get("tbr") or f.get("abr") or 0,
-                            reverse=True,
-                        )
-                        stream_url = combined[0]["url"]
-                    else:
-                        # Fall back to any format with a URL
-                        all_urls = [f for f in formats if f.get("url")]
-                        if all_urls:
-                            all_urls.sort(
-                                key=lambda f: f.get("tbr") or f.get("abr") or 0,
-                                reverse=True,
-                            )
-                            stream_url = all_urls[0]["url"]
-                else:
-                    # Audio-only: prefer formats with no video codec
-                    audio_only = [
-                        f for f in formats
-                        if f.get("vcodec") in (None, "none")
-                        and f.get("acodec") not in (None, "none")
-                        and f.get("url")
-                    ]
-                    if audio_only:
-                        audio_only.sort(
-                            key=lambda f: f.get("abr") or f.get("tbr") or 0,
-                            reverse=True,
-                        )
-                        stream_url = audio_only[0]["url"]
-                    else:
-                        # Fallback: any format with URL
-                        all_urls = [f for f in formats if f.get("url")]
-                        if all_urls:
-                            all_urls.sort(
-                                key=lambda f: f.get("abr") or f.get("tbr") or 0,
-                                reverse=True,
-                            )
-                            stream_url = all_urls[0]["url"]
-
+            stream_url = _pick_stream_url(info, video)
             if not stream_url:
                 raise RuntimeError(
                     "Could not extract a streaming URL from yt-dlp info.")
 
             logger.info(
-                f"✅ [live_stream] Resolved URL (first 80 chars): "
+                f"✅ [live/yt-dlp] Resolved URL (first 80 chars): "
                 f"{stream_url[:80]}…"
             )
             return stream_url
 
         except Exception as exc:
             err_str = str(exc)
-            logger.error(f"📡 [live_stream] Error: {err_str[:300]}")
+            logger.error(f"📡 [live/yt-dlp] Error: {err_str[:300]}")
 
-            # ── Amazon IP flip mid-resolve ─────────────────────────────────
+            # ── IP became Amazon mid-resolve ──────────────────────────────
             if is_auth_error(exc):
                 await check_ip_quality()
                 if is_blocked_ip():
-                    info_ip = _CURRENT_IP_INFO
+                    ip_info = _CURRENT_IP_INFO
                     logger.warning(
                         "🚫 Live stream resolve: IP became Amazon — re-queuing …")
                     await send_to_log_group(
                         text=(
                             f"🚫 **Live Stream Paused — Amazon IP**\n\n"
-                            f"🌍 IP  : `{info_ip.get('ip', 'unknown')}`\n"
-                            f"🏢 Org : `{info_ip.get('org', 'unknown')}`\n\n"
+                            f"🌍 IP  : `{ip_info.get('ip', 'unknown')}`\n"
+                            f"🏢 Org : `{ip_info.get('org', 'unknown')}`\n\n"
                             f"⏳ Waiting for non-Amazon IP …\n\n"
                             f"#BlockedIP #LiveStream"
                         )
@@ -1464,11 +1490,11 @@ async def live_stream(
                     cookie_file = await get_cookies()
                     continue
 
-            # ── Auth / bot / cookie → infinite regen ──────────────────────
+            # ── Auth / bot / cookie error → infinite cookie regen ─────────
             if is_auth_error(exc):
                 cookie_cycle += 1
                 logger.warning(
-                    f"🤖 [live_stream] Auth/bot error — "
+                    f"🤖 [live/yt-dlp] Auth/bot error — "
                     f"cookie regen cycle #{cookie_cycle} …"
                 )
                 clear_old_cookies()
@@ -1504,20 +1530,82 @@ async def live_stream(
                 await asyncio.sleep(random.uniform(1, 3))
                 continue
 
-            # ── Non-auth / non-retryable error → give up ──────────────────
+            # ── Non-retryable error → give up ─────────────────────────────
             logger.error(
-                f"📡 [live_stream] Non-retryable error for {link}: "
+                f"📡 [live/yt-dlp] Non-retryable error for {link}: "
                 f"{err_str[:300]}"
             )
             await send_to_log_group(
                 text=(
-                    f"❌ **Live Stream Resolution Failed**\n\n"
+                    f"❌ **Live Stream (yt-dlp) Failed**\n\n"
                     f"🔗 URL   : `{link}`\n"
                     f"⚠️ Error : `{err_str[:300]}`\n\n"
                     f"#LiveStream"
                 )
             )
             return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  LIVE STREAM — PUBLIC ENTRY POINT
+#
+#  Full chain (mirrors download_song / download_video):
+#    1. API key  →  _live_stream_via_api()
+#    2. cookies.txt / cookie regen  →  _live_stream_via_ytdlp()
+#
+#  Returns a direct HLS/manifest URL string for pytgcalls / FFmpeg.
+# ══════════════════════════════════════════════════════════════════════════════
+async def live_stream(
+    link: str,
+    video: bool = False,
+) -> Optional[str]:
+    """
+    Resolve a YouTube live stream URL to a direct HLS/manifest URL.
+
+    Chain:
+      1. External API  (if API_URL + API_KEY are configured)
+      2. yt-dlp with cookies.txt  (auto-generated via Playwright)
+         → infinite cookie regen on auth/bot errors
+         → waits for non-Amazon IP if blocked
+
+    Parameters
+    ----------
+    link  : full YouTube URL  (e.g. https://www.youtube.com/live/CMOm2KSl1Uo)
+    video : True  → best video+audio stream URL
+            False → best audio-only stream URL  (default)
+
+    Returns
+    -------
+    str   : direct streaming URL ready for pytgcalls / FFmpeg
+    None  : all methods failed
+    """
+    logger.info(f"🔴 [live_stream] Start | link={link} | video={video}")
+
+    # ── Step 1: Try the API ───────────────────────────────────────────────
+    vid = extract_video_id(link) or link
+    if API_URL:
+        result = await _live_stream_via_api(vid, video=video)
+        if result:
+            logger.info("✅ [live_stream] Resolved via API")
+            return result
+        logger.info("📡 [live_stream] API failed / not configured — trying yt-dlp …")
+
+    # ── Step 2: yt-dlp with cookies.txt / cookie regen ───────────────────
+    result = await _live_stream_via_ytdlp(link, video=video)
+    if result:
+        logger.info("✅ [live_stream] Resolved via yt-dlp")
+        return result
+
+    logger.error(f"❌ [live_stream] All methods failed for: {link}")
+    await send_to_log_group(
+        text=(
+            f"❌ **Live Stream Resolution Failed — All Methods**\n\n"
+            f"🔗 URL  : `{link}`\n"
+            f"📋 Tried: API → yt-dlp+cookies\n\n"
+            f"#LiveStream"
+        )
+    )
+    return None
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PLAY_URL AUTO-TEST
