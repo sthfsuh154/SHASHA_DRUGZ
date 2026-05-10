@@ -3,9 +3,7 @@ import json
 import os
 from random import randint
 from typing import Union
-
 from pyrogram.types import InlineKeyboardMarkup
-
 import config
 from SHASHA_DRUGZ import Carbon, YouTube, app
 from SHASHA_DRUGZ.core.call import SHASHA
@@ -16,7 +14,6 @@ from SHASHA_DRUGZ.utils.inline import aq_markup, queuemarkup, close_markup, stre
 from SHASHA_DRUGZ.utils.pastebin import SHASHABin
 from SHASHA_DRUGZ.utils.stream.queue import put_queue, put_queue_index
 from SHASHA_DRUGZ.utils.thumbnails import get_thumb
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  ntgcalls ONLY supports these codecs — anything else must be re-encoded
@@ -43,7 +40,6 @@ async def _probe(file_path: str) -> dict:
         stderr=asyncio.subprocess.DEVNULL,
     )
     stdout, _ = await proc.communicate()
-
     result = {"video_codec": None, "audio_codec": None}
     try:
         data = json.loads(stdout)
@@ -56,7 +52,6 @@ async def _probe(file_path: str) -> dict:
                 result["audio_codec"] = cname
     except Exception:
         pass
-
     return result
 
 
@@ -64,7 +59,6 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
     """
     Inspect the ACTUAL codec inside the file using ffprobe (not the extension).
     Re-encode only what ntgcalls cannot handle:
-
         Video mode → H.264 + AAC inside MP4
         Audio mode → AAC inside M4A  (no video track)
 
@@ -77,6 +71,20 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
     The output file is cached (_compat suffix) so repeated plays are free.
     If ffmpeg fails for any reason the original path is returned so the bot
     does not crash — it may just not play that file.
+
+    Codec map:
+    ┌──────────────────────┬────────────────────────────────┐
+    │ Input codec          │ Action                         │
+    ├──────────────────────┼────────────────────────────────┤
+    │ H.264 + AAC in MP4   │ pass-through (zero cost)       │
+    │ H.265 / HEVC         │ re-encode video → libx264      │
+    │ VP9 / VP8 / AV1      │ re-encode video → libx264      │
+    │ MPEG-4 / DivX / Xvid │ re-encode video → libx264      │
+    │ MP3 inside MP4/MKV   │ re-encode audio → aac          │
+    │ Opus / Vorbis / FLAC │ re-encode audio → aac          │
+    │ Any non-MP4 container│ remux / re-encode → .mp4       │
+    │ Audio-only file      │ adds black canvas (video mode) │
+    └──────────────────────┴────────────────────────────────┘
     """
     info = await _probe(file_path)
     v_codec = info["video_codec"]   # e.g. "hevc", "vp9", "h264", None
@@ -109,7 +117,6 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
 
         v_flag = "copy" if (not needs_v and not no_vid) else "libx264"
         a_flag = "copy" if not needs_a else "aac"
-
         cmd += ["-c:v", v_flag, "-c:a", a_flag]
 
         if v_flag == "libx264":
@@ -123,7 +130,6 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
         # ── AUDIO MODE ─────────────────────────────────────────────────────
         needs_a  = (a_codec is not None) and (a_codec not in SUPPORTED_AUDIO_CODECS)
         is_native = file_path.lower().endswith((".m4a", ".aac")) and not needs_a
-
         if is_native:
             return file_path
 
@@ -155,7 +161,6 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 #  Main stream dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
-
 async def stream(
     _,
     mystic,
@@ -191,12 +196,10 @@ async def stream(
                 ) = await YouTube.details(search, False if spotify else True)
             except:
                 continue
-
             if str(duration_min) == "None":
                 continue
             if duration_sec > config.DURATION_LIMIT:
                 continue
-
             if await is_active_chat(chat_id):
                 await put_queue(
                     chat_id,
@@ -213,21 +216,17 @@ async def stream(
                 count += 1
                 msg += f"{count}. {title[:70]}\n"
                 msg += f"{_['play_20']} {position}\n\n"
-
             else:
                 if not forceplay:
                     db[chat_id] = []
                 status = True if video else None
-
                 try:
                     file_path, direct = await YouTube.download(
                         vidid, mystic, video=status, videoid=True
                     )
                 except:
                     raise AssistantErr(_["play_14"])
-
                 img = await get_thumb(vidid)
-
                 await SHASHA.join_call(
                     chat_id,
                     original_chat_id,
@@ -235,7 +234,6 @@ async def stream(
                     video=status,
                     image=img,
                 )
-
                 await put_queue(
                     chat_id,
                     original_chat_id,
@@ -248,9 +246,7 @@ async def stream(
                     "video" if video else "audio",
                     forceplay=forceplay,
                 )
-
                 button = stream_markup(_, vidid, chat_id)
-
                 run = await app.send_photo(
                     original_chat_id,
                     photo=img,
@@ -262,10 +258,8 @@ async def stream(
                     ),
                     reply_markup=InlineKeyboardMarkup(button),
                 )
-
                 db[chat_id][0]["mystic"] = run
                 db[chat_id][0]["markup"] = "stream"
-
         if count == 0:
             return
         else:
@@ -275,17 +269,14 @@ async def stream(
                 car = os.linesep.join(msg.split(os.linesep)[:17])
             else:
                 car = msg
-
             carbon = await Carbon.generate(car, randint(100, 10000000))
             upl = close_markup(_)
-
             return await app.send_photo(
                 original_chat_id,
                 photo=carbon,
                 caption=_["play_21"].format(position, link),
                 reply_markup=upl,
             )
-
 
     # ── YOUTUBE DIRECT ───────────────────────────────────────────────────────
     elif streamtype == "youtube":
@@ -294,16 +285,13 @@ async def stream(
         title = (result["title"]).title()
         duration_min = result["duration_min"]
         status = True if video else None
-
         try:
             file_path, direct = await YouTube.download(
                 vidid, mystic, videoid=True, video=status
             )
         except:
             raise AssistantErr(_["play_14"])
-
         img = await get_thumb(vidid)
-
         if await is_active_chat(chat_id):
             await put_queue(
                 chat_id,
@@ -316,10 +304,8 @@ async def stream(
                 user_id,
                 "video" if video else "audio",
             )
-
             position = len(db.get(chat_id)) - 1
             button = queuemarkup(_, vidid, chat_id)
-
             await app.send_photo(
                 chat_id=original_chat_id,
                 photo=img,
@@ -328,11 +314,9 @@ async def stream(
                 ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
-
         else:
             if not forceplay:
                 db[chat_id] = []
-
             await SHASHA.join_call(
                 chat_id,
                 original_chat_id,
@@ -340,7 +324,6 @@ async def stream(
                 video=status,
                 image=img,
             )
-
             await put_queue(
                 chat_id,
                 original_chat_id,
@@ -353,9 +336,7 @@ async def stream(
                 "video" if video else "audio",
                 forceplay=forceplay,
             )
-
             button = stream_markup(_, vidid, chat_id)
-
             run = await app.send_photo(
                 original_chat_id,
                 photo=img,
@@ -367,17 +348,14 @@ async def stream(
                 ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
-
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "stream"
-
 
     # ── SOUNDCLOUD ───────────────────────────────────────────────────────────
     elif streamtype == "soundcloud":
         file_path = result["filepath"]
         title = result["title"]
         duration_min = result["duration_min"]
-
         if await is_active_chat(chat_id):
             await put_queue(
                 chat_id,
@@ -390,10 +368,8 @@ async def stream(
                 user_id,
                 "audio",
             )
-
             position = len(db.get(chat_id)) - 1
             button = aq_markup(_, chat_id)
-
             await app.send_message(
                 chat_id=original_chat_id,
                 text=_["queue_4"].format(
@@ -401,13 +377,10 @@ async def stream(
                 ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
-
         else:
             if not forceplay:
                 db[chat_id] = []
-
             await SHASHA.join_call(chat_id, original_chat_id, file_path, video=None)
-
             await put_queue(
                 chat_id,
                 original_chat_id,
@@ -420,9 +393,7 @@ async def stream(
                 "audio",
                 forceplay=forceplay,
             )
-
             button = stream_markup2(_, chat_id)
-
             run = await app.send_photo(
                 original_chat_id,
                 photo=config.SOUNCLOUD_IMG_URL,
@@ -431,10 +402,8 @@ async def stream(
                 ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
-
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-
 
     # ── TELEGRAM ─────────────────────────────────────────────────────────────
     elif streamtype == "telegram":
@@ -444,21 +413,14 @@ async def stream(
         duration_min = result["dur"]
         status       = True if video else None
 
-        # ✅ THE FIX — ffprobe reads the real codec, not just the extension.
+        # ✅ THE CORE FIX — ffprobe reads the real codec, not just the extension.
         #
-        #   Codec map → what gets re-encoded:
-        #   ┌──────────────────────┬────────────────────────────────┐
-        #   │ Input codec          │ Action                         │
-        #   ├──────────────────────┼────────────────────────────────┤
-        #   │ H.264 + AAC in MP4   │ pass-through (zero cost)       │
-        #   │ H.265 / HEVC         │ re-encode video → libx264      │
-        #   │ VP9 / VP8 / AV1      │ re-encode video → libx264      │
-        #   │ MPEG-4 / DivX / Xvid │ re-encode video → libx264      │
-        #   │ MP3 inside MP4/MKV   │ re-encode audio → aac          │
-        #   │ Opus / Vorbis / FLAC │ re-encode audio → aac          │
-        #   │ Any non-MP4 container│ remux / re-encode → .mp4       │
-        #   │ Audio-only file      │ adds black canvas (video mode) │
-        #   └──────────────────────┴────────────────────────────────┘
+        #   This handles ALL of:
+        #   • .mkv with HEVC/VP9/VP8/AV1/MPEG-4 → re-encoded to H.264+AAC in .mp4
+        #   • .mp4 with wrong codec (e.g. HEVC or MP3 audio) → re-encoded
+        #   • .avi .wmv .flv .mov .ts .webm etc. → remuxed/re-encoded to .mp4
+        #   • Audio-only files in video mode → black canvas added automatically
+        #   • Already H.264+AAC in .mp4 → returned instantly (zero cost)
         file_path = await ensure_compatible(file_path, video=bool(video))
 
         if await is_active_chat(chat_id):
@@ -475,7 +437,6 @@ async def stream(
             )
             position = len(db.get(chat_id)) - 1
             button = aq_markup(_, chat_id)
-
             await app.send_message(
                 chat_id=original_chat_id,
                 text=_["queue_4"].format(
@@ -483,15 +444,12 @@ async def stream(
                 ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
-
         else:
             if not forceplay:
                 db[chat_id] = []
-
             await SHASHA.join_call(
                 chat_id, original_chat_id, file_path, video=status
             )
-
             await put_queue(
                 chat_id,
                 original_chat_id,
@@ -504,12 +462,9 @@ async def stream(
                 "video" if video else "audio",
                 forceplay=forceplay,
             )
-
             if video:
                 await add_active_video_chat(chat_id)
-
             button = stream_markup2(_, chat_id)
-
             run = await app.send_photo(
                 original_chat_id,
                 photo=config.TELEGRAM_VIDEO_URL if video else config.TELEGRAM_AUDIO_URL,
@@ -518,10 +473,8 @@ async def stream(
                 ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
-
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-
 
     # ── LIVE ─────────────────────────────────────────────────────────────────
     elif streamtype == "live":
@@ -530,7 +483,6 @@ async def stream(
         title = (result["title"]).title()
         duration_min = "Live Track"
         status = True if video else None
-
         if await is_active_chat(chat_id):
             await put_queue(
                 chat_id,
@@ -543,10 +495,8 @@ async def stream(
                 user_id,
                 "video" if video else "audio",
             )
-
             position = len(db.get(chat_id)) - 1
             button = aq_markup(_, chat_id)
-
             await app.send_message(
                 chat_id=original_chat_id,
                 text=_["queue_4"].format(
@@ -554,17 +504,13 @@ async def stream(
                 ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
-
         else:
             if not forceplay:
                 db[chat_id] = []
-
             n, file_path = await YouTube.video(link)
             if n == 0:
                 raise AssistantErr(_["str_3"])
-
             img = await get_thumb(vidid)
-
             await SHASHA.join_call(
                 chat_id,
                 original_chat_id,
@@ -572,7 +518,6 @@ async def stream(
                 video=status,
                 image=img,
             )
-
             await put_queue(
                 chat_id,
                 original_chat_id,
@@ -585,9 +530,7 @@ async def stream(
                 "video" if video else "audio",
                 forceplay=forceplay,
             )
-
             button = stream_markup2(_, chat_id)
-
             run = await app.send_photo(
                 original_chat_id,
                 photo=img,
@@ -599,17 +542,14 @@ async def stream(
                 ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
-
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-
 
     # ── INDEX / M3U8 ─────────────────────────────────────────────────────────
     elif streamtype == "index":
         link = result
         title = "ɪɴᴅᴇx ᴏʀ ᴍ3ᴜ8 ʟɪɴᴋ"
         duration_min = "00:00"
-
         if await is_active_chat(chat_id):
             await put_queue_index(
                 chat_id,
@@ -621,28 +561,23 @@ async def stream(
                 link,
                 "video" if video else "audio",
             )
-
             position = len(db.get(chat_id)) - 1
             button = aq_markup(_, chat_id)
-
             await mystic.edit_text(
                 text=_["queue_4"].format(
                     position, title[:27], duration_min, user_name
                 ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
-
         else:
             if not forceplay:
                 db[chat_id] = []
-
             await SHASHA.join_call(
                 chat_id,
                 original_chat_id,
                 link,
                 video=True if video else None,
             )
-
             await put_queue_index(
                 chat_id,
                 original_chat_id,
@@ -654,16 +589,13 @@ async def stream(
                 "video" if video else "audio",
                 forceplay=forceplay,
             )
-
             button = stream_markup2(_, chat_id)
-
             run = await app.send_photo(
                 original_chat_id,
                 photo=config.STREAM_IMG_URL,
                 caption=_["stream_2"].format(user_name),
                 reply_markup=InlineKeyboardMarkup(button),
             )
-
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
             await mystic.delete()
