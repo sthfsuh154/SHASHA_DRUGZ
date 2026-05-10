@@ -44,7 +44,7 @@ from config import LOG_GROUP_ID
 # ══════════════════════════════════════════════════════════════════════════════
 #  ENVIRONMENT / CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
-API_URL  = os.getenv("API_URL", "").rstrip("/") #,
+API_URL  = os.getenv("API_URL", "https://shrutibots.site").rstrip("/") #,
 API_KEY  = os.getenv("API_KEY", "")
 PLAY_URL = os.getenv(
     "PLAY_URL", "https://youtu.be/ip8o5hDFLhI?si=jCdWYdBAEulr2b49")
