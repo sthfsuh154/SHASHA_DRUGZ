@@ -60,7 +60,7 @@ from SHASHA_DRUGZ.utils.inline import (
     track_markup,
 )
 from SHASHA_DRUGZ.utils.stream.autoclear import auto_clean
-# ✅ FIX: import ensure_compatible so the local stream() can use it
+# ✅ Import ensure_compatible so the local stream() can use it
 from SHASHA_DRUGZ.utils.stream.stream import ensure_compatible
 from SHASHA_DRUGZ.utils.thumbnails import get_thumb
 from SHASHA_DRUGZ.utils.channelplay import get_channeplayCB
@@ -314,7 +314,10 @@ async def del_back_playlist(client, callback_query, _):
 
 # ─── stop ─────────────────────────────────────────────────────────────────────
 @app.on_message(
-    filters.command(["end", "cend"], prefixes=["end", "/", "!", "%", ",", "", ".", "@", "#"])
+    filters.command(
+        ["end", "cend"],
+        prefixes=["end", "/", "!", "%", ",", "", ".", "@", "#"]
+    )
     & filters.group
     & ~BANNED_USERS
 )
@@ -331,7 +334,10 @@ async def stop_music(cli, message: Message, _, chat_id):
 
 # ─── skip ─────────────────────────────────────────────────────────────────────
 @app.on_message(
-    filters.command(["skip", "cskip", "next", "cnext"], prefixes=["skip", "/", "!", "%", ",", ".", "@", "#"])
+    filters.command(
+        ["skip", "cskip", "next", "cnext"],
+        prefixes=["skip", "/", "!", "%", ",", ".", "@", "#"]
+    )
     & filters.group
     & ~BANNED_USERS
 )
@@ -608,7 +614,10 @@ async def seek_comm(cli, message: Message, _, chat_id):
 # ─── play ─────────────────────────────────────────────────────────────────────
 @app.on_message(
     filters.command(
-        ["play", "vplay", "cplay", "cvplay", "playforce", "vplayforce", "cplayforce", "cvplayforce"],
+        [
+            "play", "vplay", "cplay", "cvplay",
+            "playforce", "vplayforce", "cplayforce", "cvplayforce",
+        ],
         prefixes=["/", "!", "%", "", ".", "@", "#"]
     )
     & filters.group
@@ -684,7 +693,7 @@ async def play_commnd(
     # ── TELEGRAM VIDEO / DOCUMENT ─────────────────────────────────────────────
     elif video_telegram:
         if message.reply_to_message.document:
-            # ✅ FIX: Accept ALL video/audio extensions, not just a small list
+            # ✅ Accept ALL video/audio extensions, not just a small list
             try:
                 fname = video_telegram.file_name or ""
                 ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
@@ -757,7 +766,9 @@ async def play_commnd(
                 cap = _["play_10"]
             elif "https://youtu.be" in url:
                 videoid = url.split("/")[-1].split("?")[0]
-                details, track_id = await YouTube.track(f"https://www.youtube.com/watch?v={videoid}")
+                details, track_id = await YouTube.track(
+                    f"https://www.youtube.com/watch?v={videoid}"
+                )
                 streamtype = "youtube"
                 img = details["thumb"]
                 cap = _["play_11"].format(details["title"], details["duration_min"])
@@ -964,6 +975,7 @@ async def play_commnd(
             return await mystic.edit_text(e)
         await mystic.delete()
         return await play_logs(message, streamtype=streamtype)
+
     else:
         if plist_type:
             ran_hash = "".join(
