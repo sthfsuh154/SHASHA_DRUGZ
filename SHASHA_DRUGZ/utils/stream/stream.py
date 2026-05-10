@@ -24,25 +24,34 @@ SUPPORTED_AUDIO_CODECS = {"aac"}
 
 async def _probe(file_path: str) -> dict:
     """
-    Run ffprobe on the file and return the actual codec names.
-    Returns: { "video_codec": str|None, "audio_codec": str|None }
+    Run ffprobe on the file and return the actual codec names and container.
+    Returns: { "video_codec": str|None, "audio_codec": str|None, "format": str|None }
     """
     cmd = [
         "ffprobe",
         "-v", "quiet",
         "-print_format", "json",
         "-show_streams",
+        "-show_format",
         file_path,
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    stdout, _ = await proc.communicate()
-    result = {"video_codec": None, "audio_codec": None}
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+    except Exception as e:
+        print(f"[_probe] ffprobe launch failed for {file_path}: {e}")
+        return {"video_codec": None, "audio_codec": None, "format": None}
+
+    result = {"video_codec": None, "audio_codec": None, "format": None}
     try:
         data = json.loads(stdout)
+        # container format name (e.g. "matroska,webm", "avi", "mov,mp4,m4a,3gp,3g2,mj2")
+        fmt = data.get("format", {}).get("format_name", "")
+        result["format"] = fmt.lower() if fmt else None
         for s in data.get("streams", []):
             ctype = s.get("codec_type", "")
             cname = s.get("codec_name", "").lower()
@@ -50,8 +59,9 @@ async def _probe(file_path: str) -> dict:
                 result["video_codec"] = cname
             elif ctype == "audio" and result["audio_codec"] is None:
                 result["audio_codec"] = cname
-    except Exception:
-        pass
+    except Exception as ex:
+        print(f"[_probe] JSON parse error for {file_path}: {ex}")
+
     return result
 
 
@@ -86,23 +96,30 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
     │ Audio-only file      │ adds black canvas (video mode) │
     └──────────────────────┴────────────────────────────────┘
     """
+    if not file_path or not os.path.exists(file_path):
+        print(f"[ensure_compatible] File not found: {file_path}")
+        return file_path
+
     info = await _probe(file_path)
-    v_codec = info["video_codec"]   # e.g. "hevc", "vp9", "h264", None
-    a_codec = info["audio_codec"]   # e.g. "mp3", "opus", "aac", None
+    v_codec = info["video_codec"]    # e.g. "hevc", "vp9", "h264", None
+    a_codec = info["audio_codec"]    # e.g. "mp3", "opus", "aac", None
+    fmt     = info["format"] or ""   # e.g. "matroska,webm", "mov,mp4,m4a,3gp,3g2,mj2"
+
+    # Check if the container is truly MP4-compatible
+    is_mp4_container = "mov,mp4" in fmt or fmt == "mp4"
 
     if video:
         # ── VIDEO MODE ─────────────────────────────────────────────────────
         needs_v = (v_codec is not None) and (v_codec not in SUPPORTED_VIDEO_CODECS)
         needs_a = (a_codec is not None) and (a_codec not in SUPPORTED_AUDIO_CODECS)
         no_vid  = v_codec is None
-        is_mp4  = file_path.lower().endswith(".mp4")
 
-        # Perfect file: H.264 + AAC already in an MP4 container
-        if is_mp4 and not needs_v and not needs_a and not no_vid:
+        # Perfect file: H.264 + AAC already in an MP4 container — zero cost
+        if is_mp4_container and not needs_v and not needs_a and not no_vid:
             return file_path
 
         out_path = os.path.splitext(file_path)[0] + "_compat.mp4"
-        if os.path.exists(out_path):
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             return out_path
 
         cmd = ["ffmpeg", "-y", "-i", file_path]
@@ -114,9 +131,12 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
                 "-i", "color=c=black:s=1280x720:r=24",
                 "-shortest",
             ]
+            v_flag = "libx264"
+        else:
+            v_flag = "copy" if not needs_v else "libx264"
 
-        v_flag = "copy" if (not needs_v and not no_vid) else "libx264"
         a_flag = "copy" if not needs_a else "aac"
+
         cmd += ["-c:v", v_flag, "-c:a", a_flag]
 
         if v_flag == "libx264":
@@ -124,17 +144,22 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
         if a_flag == "aac":
             cmd += ["-b:a", "128k"]
 
-        cmd += ["-movflags", "+faststart", out_path]
+        # Always force MP4 container output
+        cmd += ["-f", "mp4", "-movflags", "+faststart", out_path]
 
     else:
         # ── AUDIO MODE ─────────────────────────────────────────────────────
-        needs_a  = (a_codec is not None) and (a_codec not in SUPPORTED_AUDIO_CODECS)
-        is_native = file_path.lower().endswith((".m4a", ".aac")) and not needs_a
-        if is_native:
+        needs_a = (a_codec is not None) and (a_codec not in SUPPORTED_AUDIO_CODECS)
+        # Native pass: file is already AAC in an m4a/aac container
+        is_native_audio = (
+            file_path.lower().endswith((".m4a", ".aac"))
+            and not needs_a
+        )
+        if is_native_audio:
             return file_path
 
         out_path = os.path.splitext(file_path)[0] + "_compat.m4a"
-        if os.path.exists(out_path):
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             return out_path
 
         a_flag = "copy" if not needs_a else "aac"
@@ -144,17 +169,29 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
         cmd.append(out_path)
 
     # ── Run ffmpeg ──────────────────────────────────────────────────────────
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
+    print(f"[ensure_compatible] Running: {' '.join(cmd)}")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+    except Exception as e:
+        print(f"[ensure_compatible] ffmpeg launch failed: {e}")
+        return file_path
 
-    if proc.returncode != 0 or not os.path.exists(out_path):
-        print(f"[ensure_compatible] ffmpeg error for {file_path}:\n{stderr.decode()}")
+    if proc.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        print(f"[ensure_compatible] ffmpeg error for {file_path}:\n{stderr.decode(errors='replace')}")
+        # Clean up broken output file
+        try:
+            if os.path.exists(out_path):
+                os.remove(out_path)
+        except Exception:
+            pass
         return file_path   # fall back — bot won't crash
 
+    print(f"[ensure_compatible] Done: {file_path} → {out_path}")
     return out_path
 
 
@@ -413,7 +450,7 @@ async def stream(
         duration_min = result["dur"]
         status       = True if video else None
 
-        # ✅ THE CORE FIX — ffprobe reads the real codec, not just the extension.
+        # ✅ THE CORE FIX — ffprobe reads the REAL codec, not just the extension.
         #
         #   This handles ALL of:
         #   • .mkv with HEVC/VP9/VP8/AV1/MPEG-4 → re-encoded to H.264+AAC in .mp4
