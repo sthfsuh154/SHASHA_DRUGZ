@@ -179,7 +179,7 @@ async def monitor_vc_chat(chat_id: int):
         active_vc_chats.discard(chat_id)
         return
 
-    LOGGER.info(f"VC monitor started: chat={chat_id}")
+    #LOGGER.info(f"VC monitor started: chat={chat_id}")
 
     while chat_id in active_vc_chats and await get_vc_logger_status(chat_id):
         try:
