@@ -250,7 +250,7 @@ def _generate_word_image(word: str) -> str | None:
         draw.text((x,      y), first, font=font, fill=(255, 0,   0),   stroke_width=8, stroke_fill=(0, 0, 0))
         draw.text((x + fw, y), rest,  font=font, fill=(255, 255, 255), stroke_width=8, stroke_fill=(0, 0, 0))
 
-        footer = "🐊 ᴄʀᴏᴄᴏᴅɪʟᴇ ɢᴀᴍᴇ  |  @HeartBeat_Offi"
+        footer = "POWERD BY  | @HeartBeat_Offi"
         try:
             ff = ImageFont.truetype(_FONT_PATH, 20)
         except Exception:
@@ -458,7 +458,8 @@ async def _is_admin(chat_id: int, user_id: int) -> bool:
 # ROUND ENGINE
 # ================================================================
 async def _round_timer(chat_id: int, word: str, round_num: int):
-    await asyncio.sleep(60)
+    ROUND_TIME = 300  # seconds
+    await asyncio.sleep(ROUND_TIME)
     game = games.get(chat_id)
     if not game:
         return
