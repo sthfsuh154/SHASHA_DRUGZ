@@ -113,7 +113,7 @@ def force_gc() -> int:
     try:
         count = gc.collect()
         _malloc_trim()
-        LOGGER.info(f"[RAM_GUARD] GC collected {count} object(s); malloc_trim done.")
+        #LOGGER.info(f"[RAM_GUARD] GC collected {count} object(s); malloc_trim done.")
         return count
     except Exception as exc:
         LOGGER.error(f"[RAM_GUARD] GC error: {exc}")
@@ -178,7 +178,7 @@ def clear_cache() -> int:
         except Exception as exc:
             LOGGER.error(f"[RAM_GUARD] Scan error in '{folder}': {exc}")
 
-    LOGGER.info(f"[RAM_GUARD] Removed {deleted} old cache file(s).")
+    #LOGGER.info(f"[RAM_GUARD] Removed {deleted} old cache file(s).")
     return deleted
 
 
@@ -203,7 +203,7 @@ def status_line() -> str:
     if   ram >= MAX_RAM_MB:  badge = "🔴 CRITICAL"
     elif ram >= WARN_RAM_MB: badge = "🟡 WARNING"
     else:                    badge = "🟢 OK"
-    return f"[RAM_GUARD] RAM: {ram:.1f} MB — {badge}"
+    return #f"[RAM_GUARD] RAM: {ram:.1f} MB — {badge}"
 
 
 # =========================================================
@@ -258,7 +258,7 @@ async def ram_guard_loop() -> None:
             # ── CRITICAL — graceful restart ──────────────
             if ram >= MAX_RAM_MB:
                 LOGGER.warning(
-                    f"[RAM_GUARD] RAM at {ram:.1f} MB exceeds limit "
+                    #f"[RAM_GUARD] RAM at {ram:.1f} MB exceeds limit "
                     f"({MAX_RAM_MB} MB). Performing safe restart..."
                 )
                 force_gc()
