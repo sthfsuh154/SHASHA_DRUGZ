@@ -1,4 +1,18 @@
+# ─────────────────────────────────────────────────────────────
+# CRITICAL: Create and register the event loop FIRST —
+# before any import that might touch asyncio internally
+# (Pyrogram, Telethon, pytgcalls all call get_event_loop()
+# at class-creation time during import).
+# This guarantees every client shares the same loop as main().
+# ─────────────────────────────────────────────────────────────
 import asyncio
+
+_loop = asyncio.new_event_loop()
+asyncio.set_event_loop(_loop)
+
+# ─────────────────────────────────────────────────────────────
+# All other imports AFTER the loop is set
+# ─────────────────────────────────────────────────────────────
 import importlib
 import logging
 import os
@@ -19,15 +33,15 @@ from SHASHA_DRUGZ.plugins.PREMIUM.deploy import (
 )
 from SHASHA_DRUGZ.mongo.deploydb import ensure_indexes
 from SHASHA_DRUGZ.plugins.PREMIUM.movebots import load_movebots
-from SHASHA_DRUGZ.plugins.PREMIUM.ram_guard import ram_guard_loop   # ← RAM guard
+from SHASHA_DRUGZ.plugins.PREMIUM.ram_guard import ram_guard_loop
 
 # ─────────────────────────────────────────────────────────────
 # Restart settings
 # ─────────────────────────────────────────────────────────────
-RESTART_DELAY = 10   # seconds before autorestart.py relaunches the process
+RESTART_DELAY = 10
 
 # ─────────────────────────────────────────────────────────────
-# Filter: hide noisy UpdateGroupCall AttributeErrors from logs
+# Filter: hide noisy UpdateGroupCall AttributeErrors
 # ─────────────────────────────────────────────────────────────
 class HideUpdateGroupCallError(logging.Filter):
     def filter(self, record):
@@ -43,7 +57,7 @@ class HideUpdateGroupCallError(logging.Filter):
 logging.getLogger("pyrogram.dispatcher").addFilter(HideUpdateGroupCallError())
 
 # ─────────────────────────────────────────────────────────────
-# Safe Telethon start — auto-waits on FloodWait
+# Safe Telethon start
 # ─────────────────────────────────────────────────────────────
 async def start_telethn_safe():
     while True:
@@ -63,7 +77,7 @@ async def start_telethn_safe():
             raise
 
 # ─────────────────────────────────────────────────────────────
-# Safe Pyrogram start — auto-waits on FloodWait
+# Safe Pyrogram start
 # ─────────────────────────────────────────────────────────────
 async def start_app_safe():
     while True:
@@ -132,7 +146,7 @@ async def shutdown():
             LOGGER(__name__).warning(f"⚠️ Error stopping {label}: {e}")
 
 # ─────────────────────────────────────────────────────────────
-# Main entry point
+# Main
 # ─────────────────────────────────────────────────────────────
 async def main():
     await start_telethn_safe()
@@ -140,7 +154,6 @@ async def main():
     load_manual_modules_map()
     await init_bot()
 
-    # Start RAM guard background task
     asyncio.create_task(ram_guard_loop())
 
     try:
@@ -175,28 +188,29 @@ async def main():
     )
 
 # ─────────────────────────────────────────────────────────────
-# Entry — DO NOT put a while loop here.
-# autorestart.py handles process-level restarts externally.
-# os._exit(1) ensures a FULL process exit so autorestart.py
-# spawns a brand-new process with fresh clients and a fresh
-# event loop — this is the ONLY correct fix for the
-# "Future attached to a different loop" error.
+# Entry point
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    LOGGER(__name__).info("🔁 autorestart.py handles restarts externally.")
+    LOGGER(__name__).info("🚀 Starting SHASHA_DRUGZ...")
     try:
-        asyncio.run(main())
-        # Clean exit (idle() returned normally) — do not restart
+        # Run on the same loop that was set at the top of this file.
+        # All clients imported above already share this loop → no mismatch.
+        _loop.run_until_complete(main())
+
         LOGGER(__name__).info("✅ Bot exited cleanly.")
-        os._exit(0)   # exit code 0 → autorestart.py will NOT restart
+        os._exit(0)   # code 0 → autorestart.py will NOT restart
 
     except KeyboardInterrupt:
-        LOGGER(__name__).info("🛑 Stopped manually (KeyboardInterrupt).")
-        os._exit(0)   # clean stop → no restart
+        LOGGER(__name__).info("🛑 Stopped manually.")
+        os._exit(0)
 
     except Exception as e:
         LOGGER(__name__).error(f"💥 Bot crashed: {e}")
         time.sleep(RESTART_DELAY)
-        os._exit(1)   # exit code 1 → autorestart.py WILL restart
-                      # Fresh process = fresh imports = fresh clients = fresh loop
-                      # "Future attached to a different loop" becomes impossible
+        os._exit(1)   # code 1 → autorestart.py WILL restart (fresh process)
+
+    finally:
+        try:
+            _loop.close()
+        except Exception:
+            pass
