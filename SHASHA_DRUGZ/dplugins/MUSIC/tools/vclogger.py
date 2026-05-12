@@ -181,7 +181,7 @@ async def monitor_vc_chat(chat_id: int):
 
     Auto-restarts up to 5 times on failure before giving up.
     """
-    LOGGER.info(f"VC monitor started for chat {chat_id}")
+    #LOGGER.info(f"VC monitor started for chat {chat_id}")
     retry_count = 0
     max_retries = 5
 
