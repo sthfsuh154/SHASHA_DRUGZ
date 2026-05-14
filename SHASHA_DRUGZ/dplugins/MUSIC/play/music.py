@@ -60,6 +60,7 @@ from SHASHA_DRUGZ.utils.inline import (
     track_markup,
 )
 from SHASHA_DRUGZ.utils.stream.autoclear import auto_clean
+from SHASHA_DRUGZ.utils.stream.stream import ensure_compatible  # ✅ FIX: import ensure_compatible
 from SHASHA_DRUGZ.utils.thumbnails import get_thumb
 from SHASHA_DRUGZ.utils.channelplay import get_channeplayCB
 from SHASHA_DRUGZ.utils.formatters import formats
@@ -71,12 +72,9 @@ from SHASHA_DRUGZ.utils.stream.queue import put_queue, put_queue_index
 from SHASHA_DRUGZ.utils import seconds_to_min, time_to_seconds
 from youtubesearchpython.__future__ import VideosSearch
 from config import BANNED_USERS, adminlist, lyrical
-
 # ----------------------------------- GLOBALS -----------------------------------
 checker = []
-
 # =================================== HANDLERS ===================================
-
 # ------------------------------ channel.py command -----------------------------
 @Client.on_message(filters.command(["channelplay"]) & filters.group & ~BANNED_USERS)
 @AdminActual
@@ -118,8 +116,6 @@ async def playmode_(client, message: Message, _):
             return await message.reply_text(_["cplay_6"].format(chat.title, cusn))
         await set_cmode(message.chat.id, chat.id)
         return await message.reply_text(_["cplay_3"].format(chat.title, chat.id))
-
-
 # ----------------------------------- loop.py -----------------------------------
 @Client.on_message(filters.command(["loop", "cloop"]) & filters.group & ~BANNED_USERS)
 @AdminRightsCheck
@@ -157,8 +153,6 @@ async def admins(cli, message: Message, _, chat_id):
         )
     else:
         return await message.reply_text(usage)
-
-
 # ----------------------------------- resume.py -----------------------------------
 @Client.on_message(filters.command(["resume", "cresume"]) & filters.group & ~BANNED_USERS)
 @AdminRightsCheck
@@ -180,8 +174,6 @@ async def resume_com(cli, message: Message, _, chat_id):
         _["admin_4"].format(message.from_user.mention),
         reply_markup=InlineKeyboardMarkup(buttons_resume)
     )
-
-
 # ----------------------------------- pause.py -----------------------------------
 @Client.on_message(filters.command(["pause", "cpause"]) & filters.group & ~BANNED_USERS)
 @AdminRightsCheck
@@ -200,8 +192,6 @@ async def pause_admin(cli, message: Message, _, chat_id):
         _["admin_2"].format(message.from_user.mention),
         reply_markup=InlineKeyboardMarkup(buttons)
     )
-
-
 # ----------------------------------- speed.py -----------------------------------
 @Client.on_message(
     filters.command(["cspeed", "speed", "cslow", "slow", "playback", "cplayback"])
@@ -225,8 +215,6 @@ async def playback(cli, message: Message, _, chat_id):
         text=_["admin_28"].format(app.mention),
         reply_markup=upl,
     )
-
-
 @Client.on_callback_query(filters.regex("SpeedUP") & ~BANNED_USERS)
 @languageCB
 async def del_back_playlist(client, callback_query, _):
@@ -296,8 +284,6 @@ async def del_back_playlist(client, callback_query, _):
         text=_["admin_34"].format(speed, callback_query.from_user.mention),
         reply_markup=close_markup(_),
     )
-
-
 # ----------------------------------- stop.py -----------------------------------
 @Client.on_message(
     filters.command(["end", "cend"], prefixes=["end", "/", "!", "%", ",", "", ".", "@", "#"]) & filters.group & ~BANNED_USERS
@@ -311,8 +297,6 @@ async def stop_music(cli, message: Message, _, chat_id):
     await message.reply_text(
         _["admin_5"].format(message.from_user.mention), reply_markup=close_markup(_)
     )
-
-
 # ----------------------------------- skip.py -----------------------------------
 @Client.on_message(
     filters.command(["skip", "cskip", "next", "cnext"], prefixes=["skip", "/", "!", "%", ",", ".", "@", "#"]) & filters.group & ~BANNED_USERS
@@ -477,6 +461,14 @@ async def skip(cli, message: Message, _, chat_id):
         db[chat_id][0]["mystic"] = run
         db[chat_id][0]["markup"] = "tg"
     else:
+        # ✅ FIX: queued is a raw path read from the queue (could be the original
+        # .mkv/.avi/etc. if the compat file was cleaned between plays).
+        # Always resolve through ensure_compatible so ntgcalls gets a supported
+        # codec regardless of what auto_clean did to the cached compat file.
+        queued = await ensure_compatible(queued, video=bool(status))
+        # Also update the queue entry so any subsequent auto-next / seek sees
+        # the compat path rather than the original.
+        db[chat_id][0]["file"] = queued
         if videoid == "telegram":
             image = None
         elif videoid == "soundcloud":
@@ -531,8 +523,6 @@ async def skip(cli, message: Message, _, chat_id):
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "stream"
-
-
 # ----------------------------------- seek.py -----------------------------------
 @Client.on_message(
     filters.command(["seek", "cseek", "seekback", "cseekback"])
@@ -598,8 +588,6 @@ async def seek_comm(cli, message: Message, _, chat_id):
         text=_["admin_25"].format(seconds_to_min(to_seek), message.from_user.mention),
         reply_markup=close_markup(_),
     )
-
-
 # ----------------------------------- play.py -----------------------------------
 @Client.on_message(
     filters.command(["play", "vplay", "cplay", "cvplay", "playforce", "vplayforce", "cplayforce", "cvplayforce"], prefixes=["/", "!", "%", "", ".", "@", "#"])
@@ -1040,8 +1028,6 @@ async def play_commnd(
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
                 return await play_logs(message, streamtype=f"URL Searched Inline")
-
-
 # ----------------------------------- play callbacks -----------------------------------
 @Client.on_callback_query(filters.regex("MusicStream") & ~BANNED_USERS)
 @languageCB
@@ -1112,8 +1098,6 @@ async def play_music(client, CallbackQuery, _):
         print(e)
         return await mystic.edit_text(e)
     return await mystic.delete()
-
-
 @Client.on_callback_query(filters.regex("SHASHAmousAdmin") & ~BANNED_USERS)
 async def SHASHAmous_check(client, CallbackQuery):
     try:
@@ -1123,8 +1107,6 @@ async def SHASHAmous_check(client, CallbackQuery):
         )
     except:
         pass
-
-
 @Client.on_callback_query(filters.regex("SHASHAPlaylists") & ~BANNED_USERS)
 @languageCB
 async def play_playlists_command(client, CallbackQuery, _):
@@ -1212,8 +1194,6 @@ async def play_playlists_command(client, CallbackQuery, _):
         print(e)
         return await mystic.edit_text(e)
     return await mystic.delete()
-
-
 @Client.on_callback_query(filters.regex("slider") & ~BANNED_USERS)
 @languageCB
 async def slider_queries(client, CallbackQuery, _):
@@ -1252,8 +1232,6 @@ async def slider_queries(client, CallbackQuery, _):
                 duration_min,
             ),
         )
-
-
 # ----------------------------------- STREAM FUNCTION -----------------------------------
 async def stream(
     _,
@@ -1273,7 +1251,6 @@ async def stream(
         return
     if forceplay:
         await SHASHA.force_stop_stream(chat_id)
-
     # ------------------------------------------------------------------ playlist
     if streamtype == "playlist":
         msg = f"{_['play_19']}\n\n"
@@ -1372,7 +1349,6 @@ async def stream(
                 caption=_["play_21"].format(position, link),
                 reply_markup=upl,
             )
-
     # ------------------------------------------------------------------ youtube
     elif streamtype == "youtube":
         link = result["link"]
@@ -1445,7 +1421,6 @@ async def stream(
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "stream"
-
     # ------------------------------------------------------------------ instagram
     elif streamtype == "instagram":
         ig_url = result["link"]
@@ -1524,7 +1499,6 @@ async def stream(
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-
     # ------------------------------------------------------------------ soundcloud
     elif streamtype == "soundcloud":
         file_path = result["filepath"]
@@ -1576,7 +1550,6 @@ async def stream(
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-
     # ------------------------------------------------------------------ telegram
     elif streamtype == "telegram":
         file_path = result["path"]
@@ -1584,11 +1557,15 @@ async def stream(
         title = (result["title"]).title()
         duration_min = result["dur"]
         status = True if video else None
+        # ✅ FIX: ffprobe the actual codec — never trust the file extension.
+        # Runs at the point of join_call so even if auto_clean wiped a previously
+        # built compat file, we always rebuild before streaming.
+        file_path = await ensure_compatible(file_path, video=bool(video))
         if await is_active_chat(chat_id):
             await put_queue(
                 chat_id,
                 original_chat_id,
-                file_path,
+                file_path,          # ← compat path stored, never the raw original
                 title,
                 duration_min,
                 user_name,
@@ -1610,7 +1587,7 @@ async def stream(
             await put_queue(
                 chat_id,
                 original_chat_id,
-                file_path,
+                file_path,          # ← compat path stored, never the raw original
                 title,
                 duration_min,
                 user_name,
@@ -1630,7 +1607,6 @@ async def stream(
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-
     # ------------------------------------------------------------------ live
     elif streamtype == "live":
         link = result["link"]
@@ -1698,7 +1674,6 @@ async def stream(
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-
     # ------------------------------------------------------------------ index / m3u8
     elif streamtype == "index":
         link = result
@@ -1751,8 +1726,6 @@ async def stream(
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
             await mystic.delete()
-
-
 # ----------------------------------- HELP TEXT -----------------------------------
 __menu__ = "CMD_MUSIC"
 __mod_name__ = "H_B_22"
