@@ -33,7 +33,7 @@ from SHASHA_DRUGZ.plugins.PREMIUM.deploy import (
 )
 from SHASHA_DRUGZ.mongo.deploydb import ensure_indexes
 from SHASHA_DRUGZ.plugins.PREMIUM.movebots import load_movebots
-from SHASHA_DRUGZ.plugins.PREMIUM.ram_guard import ram_guard_loop
+#from SHASHA_DRUGZ.plugins.PREMIUM.ram_guard import ram_guard_loop
 
 # ─────────────────────────────────────────────────────────────
 # Restart settings
