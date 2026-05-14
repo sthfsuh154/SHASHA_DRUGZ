@@ -20,7 +20,7 @@ LOGGER = logging.getLogger("SHASHA_RAM")
 
 CHECK_INTERVAL = 300    # RAM check frequency in seconds (default: 5 min)
 MAX_RAM_MB     = 450    # Force restart if RAM exceeds this (MB)
-WARN_RAM_MB    = 380    # Log a warning at this level (MB)
+WARN_RAM_MB    = 450 #380 (basic)    # Log a warning at this level (MB)
 CPU_WARN       = 85     # Log a CPU warning above this % usage
 MAX_FILE_AGE   = 1800   # Only delete files older than this (seconds = 30 min)
 
