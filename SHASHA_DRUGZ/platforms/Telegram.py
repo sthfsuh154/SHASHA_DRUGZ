@@ -96,7 +96,6 @@ VIDEO_MIME_MAP = {
     "video/x-m2ts":             "m2ts",
     "video/x-ms-vob":           "vob",
     "video/dvd":                "vob",
-    # Catch-all for application/octet-stream video files
     "application/octet-stream": "mp4",
 }
 
@@ -129,7 +128,6 @@ class TeleAPI:
           2. mime_type attribute  (looked up in our mime_map, then stdlib)
           3. fallback             (hardcoded safe default)
         """
-        # 1. file_name
         try:
             name = file.file_name
             if name and "." in name:
@@ -139,7 +137,6 @@ class TeleAPI:
         except Exception:
             pass
 
-        # 2. mime_type
         try:
             mime = (file.mime_type or "").lower().strip()
             if mime:
@@ -151,14 +148,9 @@ class TeleAPI:
         except Exception:
             pass
 
-        # 3. hardcoded fallback
         return fallback
 
     def is_video_document(self, file) -> bool:
-        """
-        Returns True if a document file is actually a video based on
-        its extension OR mime type.
-        """
         try:
             name = file.file_name or ""
             if "." in name:
@@ -178,10 +170,6 @@ class TeleAPI:
         return False
 
     def is_audio_document(self, file) -> bool:
-        """
-        Returns True if a document file is actually audio based on
-        its extension OR mime type.
-        """
         try:
             name = file.file_name or ""
             if "." in name:
@@ -245,13 +233,6 @@ class TeleAPI:
         """
         Returns the local download path for an audio or video file.
 
-        Supported audio : mp3 m4a aac ogg opus flac wav webm wma aiff amr
-                          awb 3gp 3g2 ape dsd tta wv spx mid ra au
-        Supported video : mp4 mkv webm avi mov wmv flv mpeg mpg 3gp 3g2
-                          ogv ts mxf asf divx rv h264 hevc m2ts vob m4v
-
-        Voice messages  : always saved as .ogg
-
         NOTE: ensure_compatible() in stream.py will re-encode to H.264+AAC
               if the actual codec inside the file isn't supported by ntgcalls.
               So we just need to preserve the real extension here.
@@ -278,8 +259,33 @@ class TeleAPI:
         checker = [5,  10, 20, 40, 66, 80, 99]
         speed_counter = {}
 
+        # ✅ KEY FIX: Always re-download to guarantee the source file is fresh.
+        #
+        # Previously:  if os.path.exists(fname): return True
+        # Problem:     On second play of the same file_unique_id, the old
+        #              downloaded file still exists on disk.  ensure_compatible()
+        #              sees its _compat cache is newer than the source → returns
+        #              the stale compat file.  But ntgcalls complains because
+        #              the *original* source file (e.g. .mkv) is what was passed
+        #              to join_call() in some code paths, not the compat file.
+        #
+        # Fix:         Delete the source file (and its compat cache) before
+        #              downloading so we always get a fresh copy and a fresh
+        #              compat encode.  The overhead is negligible because
+        #              Telegram caches files server-side.
         if os.path.exists(fname):
-            return True
+            try:
+                os.remove(fname)
+            except Exception:
+                pass
+            # Also wipe any stale compat files so ensure_compatible rebuilds them
+            for suffix in ("_compat.mp4", "_compat.m4a"):
+                compat = os.path.splitext(fname)[0] + suffix
+                if os.path.exists(compat):
+                    try:
+                        os.remove(compat)
+                    except Exception:
+                        pass
 
         async def down_load():
             async def progress(current, total):
