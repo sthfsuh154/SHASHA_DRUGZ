@@ -14,14 +14,11 @@ from SHASHA_DRUGZ.utils.inline import aq_markup, queuemarkup, close_markup, stre
 from SHASHA_DRUGZ.utils.pastebin import SHASHABin
 from SHASHA_DRUGZ.utils.stream.queue import put_queue, put_queue_index
 from SHASHA_DRUGZ.utils.thumbnails import get_thumb
-
 # ─────────────────────────────────────────────────────────────────────────────
 #  ntgcalls ONLY supports these codecs — anything else must be re-encoded
 # ─────────────────────────────────────────────────────────────────────────────
 SUPPORTED_VIDEO_CODECS = {"h264"}
 SUPPORTED_AUDIO_CODECS = {"aac"}
-
-
 async def _probe(file_path: str) -> dict:
     """
     Run ffprobe on the file and return the actual codec names and container.
@@ -45,7 +42,6 @@ async def _probe(file_path: str) -> dict:
     except Exception as e:
         print(f"[_probe] ffprobe launch failed for {file_path}: {e}")
         return {"video_codec": None, "audio_codec": None, "format": None}
-
     result = {"video_codec": None, "audio_codec": None, "format": None}
     try:
         data = json.loads(stdout)
@@ -60,10 +56,7 @@ async def _probe(file_path: str) -> dict:
                 result["audio_codec"] = cname
     except Exception as ex:
         print(f"[_probe] JSON parse error for {file_path}: {ex}")
-
     return result
-
-
 def _compat_is_valid(source_path: str, compat_path: str) -> bool:
     """
     Returns True only when the compat file:
@@ -85,69 +78,54 @@ def _compat_is_valid(source_path: str, compat_path: str) -> bool:
         return compat_mtime >= src_mtime
     except Exception:
         return False
-
-
 async def ensure_compatible(file_path: str, video: bool = False) -> str:
     """
     Inspect the ACTUAL codec inside the file using ffprobe (not the extension).
     Re-encode only what ntgcalls cannot handle:
         Video mode → H.264 + AAC inside MP4
         Audio mode → AAC inside M4A  (no video track)
-
     Handles ALL of these automatically:
         H.265 / HEVC, VP9, VP8, AV1, MPEG-4, DivX   → re-encode to H.264
         MP3-in-MP4, Opus-in-MP4, Vorbis, FLAC, PCM  → re-encode to AAC
         MKV, AVI, WMV, FLV, MOV, TS, WEBM containers → remux/re-encode to MP4
         Already H.264 + AAC in MP4                   → returned as-is instantly
-
     The output file is cached (_compat suffix) so repeated plays are free,
     UNLESS the source file is newer than the cache (stale cache is rebuilt).
-
     If ffmpeg fails for any reason the original path is returned so the bot
     does not crash — it may just not play that file.
     """
     if not file_path or not os.path.exists(file_path):
         print(f"[ensure_compatible] File not found: {file_path}")
         return file_path
-
     # If someone already passes a _compat file (e.g. from queue), pass through.
     if file_path.endswith("_compat.mp4") or file_path.endswith("_compat.m4a"):
         if os.path.getsize(file_path) > 0:
             return file_path
-
     info = await _probe(file_path)
     v_codec = info["video_codec"]    # e.g. "hevc", "vp9", "h264", None
     a_codec = info["audio_codec"]    # e.g. "mp3", "opus", "aac", None
     fmt     = info["format"] or ""   # e.g. "matroska,webm", "mov,mp4,m4a,3gp,3g2,mj2"
-
     is_mp4_container = "mov,mp4" in fmt or fmt == "mp4"
-
     if video:
         # ── VIDEO MODE ─────────────────────────────────────────────────────
         needs_v = (v_codec is not None) and (v_codec not in SUPPORTED_VIDEO_CODECS)
         needs_a = (a_codec is not None) and (a_codec not in SUPPORTED_AUDIO_CODECS)
         no_vid  = v_codec is None
-
         # Perfect file: H.264 + AAC already in an MP4 container — zero cost
         if is_mp4_container and not needs_v and not needs_a and not no_vid:
             return file_path
-
         out_path = os.path.splitext(file_path)[0] + "_compat.mp4"
-
         # ✅ KEY FIX: validate cache freshness, not just existence
         if _compat_is_valid(file_path, out_path):
             print(f"[ensure_compatible] Using valid cache: {out_path}")
             return out_path
-
         # Remove stale / zero-byte cache before rebuilding
         if os.path.exists(out_path):
             try:
                 os.remove(out_path)
             except Exception:
                 pass
-
         cmd = ["ffmpeg", "-y", "-i", file_path]
-
         if no_vid:
             # Audio-only file in video mode → add black video canvas
             cmd += [
@@ -158,48 +136,37 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
             v_flag = "libx264"
         else:
             v_flag = "copy" if not needs_v else "libx264"
-
         a_flag = "copy" if not needs_a else "aac"
-
         cmd += ["-c:v", v_flag, "-c:a", a_flag]
-
         if v_flag == "libx264":
             cmd += ["-preset", "ultrafast", "-crf", "23"]
         if a_flag == "aac":
             cmd += ["-b:a", "128k"]
-
         cmd += ["-f", "mp4", "-movflags", "+faststart", out_path]
-
     else:
         # ── AUDIO MODE ─────────────────────────────────────────────────────
         needs_a = (a_codec is not None) and (a_codec not in SUPPORTED_AUDIO_CODECS)
-
         is_native_audio = (
             file_path.lower().endswith((".m4a", ".aac"))
             and not needs_a
         )
         if is_native_audio:
             return file_path
-
         out_path = os.path.splitext(file_path)[0] + "_compat.m4a"
-
         # ✅ KEY FIX: validate cache freshness
         if _compat_is_valid(file_path, out_path):
             print(f"[ensure_compatible] Using valid cache: {out_path}")
             return out_path
-
         if os.path.exists(out_path):
             try:
                 os.remove(out_path)
             except Exception:
                 pass
-
         a_flag = "copy" if not needs_a else "aac"
         cmd = ["ffmpeg", "-y", "-i", file_path, "-vn", "-c:a", a_flag]
         if a_flag == "aac":
             cmd += ["-b:a", "128k"]
         cmd.append(out_path)
-
     # ── Run ffmpeg ──────────────────────────────────────────────────────────
     print(f"[ensure_compatible] Running: {' '.join(cmd)}")
     try:
@@ -212,7 +179,6 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
     except Exception as e:
         print(f"[ensure_compatible] ffmpeg launch failed: {e}")
         return file_path
-
     if proc.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
         print(f"[ensure_compatible] ffmpeg error for {file_path}:\n{stderr.decode(errors='replace')}")
         try:
@@ -221,11 +187,8 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
         except Exception:
             pass
         return file_path   # fall back — bot won't crash
-
     print(f"[ensure_compatible] Done: {file_path} → {out_path}")
     return out_path
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 #  Main stream dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
@@ -246,7 +209,6 @@ async def stream(
         return
     if forceplay:
         await SHASHA.force_stop_stream(chat_id)
-
     # ── PLAYLIST ─────────────────────────────────────────────────────────────
     if streamtype == "playlist":
         msg = f"{_['play_19']}\n\n"
@@ -345,7 +307,6 @@ async def stream(
                 caption=_["play_21"].format(position, link),
                 reply_markup=upl,
             )
-
     # ── YOUTUBE DIRECT ───────────────────────────────────────────────────────
     elif streamtype == "youtube":
         link = result["link"]
@@ -418,7 +379,6 @@ async def stream(
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "stream"
-
     # ── SOUNDCLOUD ───────────────────────────────────────────────────────────
     elif streamtype == "soundcloud":
         file_path = result["filepath"]
@@ -472,7 +432,6 @@ async def stream(
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-
     # ── TELEGRAM ─────────────────────────────────────────────────────────────
     elif streamtype == "telegram":
         file_path    = result["path"]
@@ -480,12 +439,10 @@ async def stream(
         title        = (result["title"]).title()
         duration_min = result["dur"]
         status       = True if video else None
-
         # ✅ THE CORE FIX — ffprobe reads the REAL codec, not just the extension.
         # Now with mtime-based cache validation so the 2nd+ play of the same
         # file_unique_id always gets a fresh compat file if the source changed.
         file_path = await ensure_compatible(file_path, video=bool(video))
-
         if await is_active_chat(chat_id):
             await put_queue(
                 chat_id,
@@ -538,7 +495,6 @@ async def stream(
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-
     # ── LIVE ─────────────────────────────────────────────────────────────────
     elif streamtype == "live":
         link = result["link"]
@@ -607,7 +563,6 @@ async def stream(
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
-
     # ── INDEX / M3U8 ─────────────────────────────────────────────────────────
     elif streamtype == "index":
         link = result
