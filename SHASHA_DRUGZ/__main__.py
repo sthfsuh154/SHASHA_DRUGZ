@@ -154,7 +154,7 @@ async def main():
     load_manual_modules_map()
     await init_bot()
 
-    asyncio.create_task(ram_guard_loop())
+    #asyncio.create_task(ram_guard_loop())
 
     try:
         await load_movebots()
