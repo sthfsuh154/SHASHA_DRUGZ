@@ -60,7 +60,6 @@ from SHASHA_DRUGZ.utils.inline import (
     track_markup,
 )
 from SHASHA_DRUGZ.utils.stream.autoclear import auto_clean
-# ✅ Import ensure_compatible so the local stream() can use it
 from SHASHA_DRUGZ.utils.stream.stream import ensure_compatible
 from SHASHA_DRUGZ.utils.thumbnails import get_thumb
 from SHASHA_DRUGZ.utils.channelplay import get_channeplayCB
@@ -75,7 +74,6 @@ from youtubesearchpython.__future__ import VideosSearch
 from config import BANNED_USERS, adminlist, lyrical
 
 # ── All supported media extensions ───────────────────────────────────────────
-# Used in the document check so ANY media file sent as a document is accepted.
 ALL_VIDEO_EXTS = {
     "mp4", "mkv", "webm", "avi", "mov", "wmv", "flv", "mpeg",
     "mpg", "3gp", "3g2", "ogv", "ts", "mxf", "asf", "divx",
@@ -693,7 +691,6 @@ async def play_commnd(
     # ── TELEGRAM VIDEO / DOCUMENT ─────────────────────────────────────────────
     elif video_telegram:
         if message.reply_to_message.document:
-            # ✅ Accept ALL video/audio extensions, not just a small list
             try:
                 fname = video_telegram.file_name or ""
                 ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
@@ -717,10 +714,8 @@ async def play_commnd(
                         "3gp | ts | m4v | mp3 | m4a | aac | ogg | opus | flac | wav"
                     )
                 )
-
         if video_telegram.file_size > config.TG_VIDEO_FILESIZE_LIMIT:
             return await mystic.edit_text(_["play_8"])
-
         file_path = await Telegram.get_filepath(video=video_telegram)
         if await Telegram.download(_, message, mystic, file_path):
             message_link = await Telegram.get_link(message)
@@ -794,7 +789,6 @@ async def play_commnd(
                 streamtype = "youtube"
                 img = details["thumb"]
                 cap = _["play_11"].format(details["title"], details["duration_min"])
-
         elif await Spotify.valid(url):
             spotify = True
             if not config.SPOTIFY_CLIENT_ID and not config.SPOTIFY_CLIENT_SECRET:
@@ -838,7 +832,6 @@ async def play_commnd(
                 cap = _["play_11"].format(message.from_user.first_name)
             else:
                 return await mystic.edit_text(_["play_15"])
-
         elif await Apple.valid(url):
             if "album" in url:
                 try:
@@ -860,7 +853,6 @@ async def play_commnd(
                 img = url
             else:
                 return await mystic.edit_text(_["play_3"])
-
         elif await Resso.valid(url):
             try:
                 details, track_id = await Resso.track(url)
@@ -869,7 +861,6 @@ async def play_commnd(
             streamtype = "youtube"
             img = details["thumb"]
             cap = _["play_10"].format(details["title"], details["duration_min"])
-
         elif await SoundCloud.valid(url):
             try:
                 details, track_path = await SoundCloud.download(url)
@@ -891,7 +882,6 @@ async def play_commnd(
                 print(e)
                 return await mystic.edit_text(e)
             return await mystic.delete()
-
         elif await Instagram.valid(url):
             try:
                 details, track_id = await Instagram.track(url)
@@ -901,7 +891,6 @@ async def play_commnd(
             streamtype = "instagram"
             img = details.get("thumb") or config.STREAM_IMG_URL
             cap = _["play_11"].format(details["title"], details["duration_min"])
-
         else:
             try:
                 await SHASHA.stream_call(url)
@@ -926,7 +915,6 @@ async def play_commnd(
                 print(e)
                 return await mystic.edit_text(e)
             return await play_logs(message, streamtype="M3u8 or Index Link")
-
     else:
         if len(message.command) < 2:
             buttons = botplaylist_markup(_)
@@ -975,7 +963,6 @@ async def play_commnd(
             return await mystic.edit_text(e)
         await mystic.delete()
         return await play_logs(message, streamtype=streamtype)
-
     else:
         if plist_type:
             ran_hash = "".join(
@@ -1193,9 +1180,6 @@ async def slider_queries(client, CallbackQuery, _):
 
 # =============================================================================
 #  LOCAL STREAM DISPATCHER
-#  ✅ KEY FIX: telegram streamtype now calls ensure_compatible() before
-#     join_call(), so .mkv/.avi/.mov/HEVC/VP9 files are re-encoded on-the-fly
-#     into H.264+AAC that ntgcalls can actually play.
 # =============================================================================
 async def stream(
     _,
@@ -1445,16 +1429,7 @@ async def stream(
         status       = True if video else None
 
         # ✅ THE FIX — re-encode unsupported codecs BEFORE calling join_call.
-        #
-        #   Without this line, files like:
-        #     • .mkv  with HEVC  → ntgcalls: "No video source found"
-        #     • .mp4  with VP9   → ntgcalls: "No video source found"
-        #     • .avi  / .mov etc → ntgcalls: "No video source found"
-        #
-        #   ensure_compatible() uses ffprobe to read the REAL codec inside the
-        #   file, then runs ffmpeg ONLY if re-encoding is needed:
-        #     H.264 + AAC in .mp4 → pass-through, zero extra cost
-        #     Anything else       → _compat.mp4 written once and cached
+        # mtime-based cache validation ensures stale compat files are rebuilt.
         file_path = await ensure_compatible(file_path, video=bool(video))
 
         if await is_active_chat(chat_id):
