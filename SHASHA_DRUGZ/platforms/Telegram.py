@@ -12,7 +12,6 @@ from SHASHA_DRUGZ.utils.formatters import (
     get_readable_time,
     seconds_to_min,
 )
-
 # ─────────────────────────────────────────────
 #  Supported AUDIO file extensions & MIME types
 # ─────────────────────────────────────────────
@@ -54,7 +53,6 @@ AUDIO_MIME_MAP = {
     "audio/basic":              "au",
     "audio/au":                 "au",
 }
-
 # ─────────────────────────────────────────────
 #  Supported VIDEO file extensions & MIME types
 # ─────────────────────────────────────────────
@@ -98,7 +96,6 @@ VIDEO_MIME_MAP = {
     "video/dvd":                "vob",
     "application/octet-stream": "mp4",
 }
-
 # ─────────────────────────────────────────────
 #  Document extension sets (for doc-type media)
 # ─────────────────────────────────────────────
@@ -112,15 +109,11 @@ DOCUMENT_VIDEO_EXTS = {
     "mpg", "3gp", "3g2", "ogv", "ts", "mxf", "asf", "divx",
     "rv", "h264", "hevc", "m2ts", "vob", "m4v",
 }
-
-
 class TeleAPI:
     def __init__(self):
         self.chars_limit = 4096
         self.sleep = 5
-
     # ── helpers ──────────────────────────────────────────────────────────
-
     def _resolve_ext(self, file, mime_map: dict, fallback: str) -> str:
         """
         Try to determine a file extension in this order:
@@ -136,7 +129,6 @@ class TeleAPI:
                     return ext
         except Exception:
             pass
-
         try:
             mime = (file.mime_type or "").lower().strip()
             if mime:
@@ -147,9 +139,7 @@ class TeleAPI:
                     return guessed.lstrip(".").lower()
         except Exception:
             pass
-
         return fallback
-
     def is_video_document(self, file) -> bool:
         try:
             name = file.file_name or ""
@@ -168,7 +158,6 @@ class TeleAPI:
         except Exception:
             pass
         return False
-
     def is_audio_document(self, file) -> bool:
         try:
             name = file.file_name or ""
@@ -187,9 +176,7 @@ class TeleAPI:
         except Exception:
             pass
         return False
-
     # ── public API ───────────────────────────────────────────────────────
-
     async def send_split_text(self, message, string):
         n = self.chars_limit
         out = [(string[i: i + n]) for i in range(0, len(string), n)]
@@ -199,10 +186,8 @@ class TeleAPI:
                 j += 1
                 await message.reply_text(x, disable_web_page_preview=True)
         return True
-
     async def get_link(self, message):
         return message.link
-
     async def get_filename(self, file, audio: Union[bool, str] = None):
         try:
             file_name = file.file_name
@@ -211,7 +196,6 @@ class TeleAPI:
         except Exception:
             file_name = "ᴛᴇʟᴇɢʀᴀᴍ ᴀᴜᴅɪᴏ" if audio else "ᴛᴇʟᴇɢʀᴀᴍ ᴠɪᴅᴇᴏ"
         return file_name
-
     async def get_duration(self, filex, file_path):
         try:
             dur = seconds_to_min(filex.duration)
@@ -224,7 +208,6 @@ class TeleAPI:
             except Exception:
                 return "Unknown"
         return dur
-
     async def get_filepath(
         self,
         audio: Union[bool, str] = None,
@@ -232,33 +215,27 @@ class TeleAPI:
     ):
         """
         Returns the local download path for an audio or video file.
-
         NOTE: ensure_compatible() in stream.py will re-encode to H.264+AAC
               if the actual codec inside the file isn't supported by ntgcalls.
               So we just need to preserve the real extension here.
         """
         downloads_dir = os.path.realpath("downloads")
         os.makedirs(downloads_dir, exist_ok=True)
-
         if audio:
             if isinstance(audio, Voice):
                 ext = "ogg"
             else:
                 ext = self._resolve_ext(audio, AUDIO_MIME_MAP, "mp3")
             file_name = os.path.join(downloads_dir, f"{audio.file_unique_id}.{ext}")
-
         if video:
             ext = self._resolve_ext(video, VIDEO_MIME_MAP, "mp4")
             file_name = os.path.join(downloads_dir, f"{video.file_unique_id}.{ext}")
-
         return file_name
-
     async def download(self, _, message, mystic, fname):
         lower   = [0,  8,  17, 38, 64, 77, 96]
         higher  = [5,  10, 20, 40, 66, 80, 99]
         checker = [5,  10, 20, 40, 66, 80, 99]
         speed_counter = {}
-
         # ✅ KEY FIX: Always re-download to guarantee the source file is fresh.
         #
         # Previously:  if os.path.exists(fname): return True
@@ -286,7 +263,6 @@ class TeleAPI:
                         os.remove(compat)
                     except Exception:
                         pass
-
         async def down_load():
             async def progress(current, total):
                 if current == total:
@@ -336,7 +312,6 @@ class TeleAPI:
                                 checker[counter] = 100
                             except Exception:
                                 pass
-
             speed_counter[message.id] = time.time()
             try:
                 await app.download_media(
@@ -353,7 +328,6 @@ class TeleAPI:
                 await mystic.edit_text(_["tg_2"].format(elapsed))
             except Exception:
                 await mystic.edit_text(_["tg_3"])
-
         task = asyncio.create_task(down_load())
         config.lyrical[mystic.id] = task
         await task
