@@ -49,7 +49,6 @@ async def _probe(file_path: str) -> dict:
     result = {"video_codec": None, "audio_codec": None, "format": None}
     try:
         data = json.loads(stdout)
-        # container format name (e.g. "matroska,webm", "avi", "mov,mp4,m4a,3gp,3g2,mj2")
         fmt = data.get("format", {}).get("format_name", "")
         result["format"] = fmt.lower() if fmt else None
         for s in data.get("streams", []):
@@ -65,6 +64,29 @@ async def _probe(file_path: str) -> dict:
     return result
 
 
+def _compat_is_valid(source_path: str, compat_path: str) -> bool:
+    """
+    Returns True only when the compat file:
+      1. exists
+      2. is non-empty
+      3. is NEWER than (or same mtime as) the source file
+         → guards against a stale cache from a previous download of the
+           same file_unique_id
+    """
+    try:
+        if not os.path.exists(compat_path):
+            return False
+        if os.path.getsize(compat_path) == 0:
+            return False
+        # If the source was re-downloaded after the compat was built,
+        # the source mtime will be newer → compat is stale.
+        src_mtime    = os.path.getmtime(source_path)
+        compat_mtime = os.path.getmtime(compat_path)
+        return compat_mtime >= src_mtime
+    except Exception:
+        return False
+
+
 async def ensure_compatible(file_path: str, video: bool = False) -> str:
     """
     Inspect the ACTUAL codec inside the file using ffprobe (not the extension).
@@ -78,34 +100,26 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
         MKV, AVI, WMV, FLV, MOV, TS, WEBM containers → remux/re-encode to MP4
         Already H.264 + AAC in MP4                   → returned as-is instantly
 
-    The output file is cached (_compat suffix) so repeated plays are free.
+    The output file is cached (_compat suffix) so repeated plays are free,
+    UNLESS the source file is newer than the cache (stale cache is rebuilt).
+
     If ffmpeg fails for any reason the original path is returned so the bot
     does not crash — it may just not play that file.
-
-    Codec map:
-    ┌──────────────────────┬────────────────────────────────┐
-    │ Input codec          │ Action                         │
-    ├──────────────────────┼────────────────────────────────┤
-    │ H.264 + AAC in MP4   │ pass-through (zero cost)       │
-    │ H.265 / HEVC         │ re-encode video → libx264      │
-    │ VP9 / VP8 / AV1      │ re-encode video → libx264      │
-    │ MPEG-4 / DivX / Xvid │ re-encode video → libx264      │
-    │ MP3 inside MP4/MKV   │ re-encode audio → aac          │
-    │ Opus / Vorbis / FLAC │ re-encode audio → aac          │
-    │ Any non-MP4 container│ remux / re-encode → .mp4       │
-    │ Audio-only file      │ adds black canvas (video mode) │
-    └──────────────────────┴────────────────────────────────┘
     """
     if not file_path or not os.path.exists(file_path):
         print(f"[ensure_compatible] File not found: {file_path}")
         return file_path
+
+    # If someone already passes a _compat file (e.g. from queue), pass through.
+    if file_path.endswith("_compat.mp4") or file_path.endswith("_compat.m4a"):
+        if os.path.getsize(file_path) > 0:
+            return file_path
 
     info = await _probe(file_path)
     v_codec = info["video_codec"]    # e.g. "hevc", "vp9", "h264", None
     a_codec = info["audio_codec"]    # e.g. "mp3", "opus", "aac", None
     fmt     = info["format"] or ""   # e.g. "matroska,webm", "mov,mp4,m4a,3gp,3g2,mj2"
 
-    # Check if the container is truly MP4-compatible
     is_mp4_container = "mov,mp4" in fmt or fmt == "mp4"
 
     if video:
@@ -119,13 +133,23 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
             return file_path
 
         out_path = os.path.splitext(file_path)[0] + "_compat.mp4"
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+
+        # ✅ KEY FIX: validate cache freshness, not just existence
+        if _compat_is_valid(file_path, out_path):
+            print(f"[ensure_compatible] Using valid cache: {out_path}")
             return out_path
+
+        # Remove stale / zero-byte cache before rebuilding
+        if os.path.exists(out_path):
+            try:
+                os.remove(out_path)
+            except Exception:
+                pass
 
         cmd = ["ffmpeg", "-y", "-i", file_path]
 
         if no_vid:
-            # Audio-only file requested in video mode → add black video canvas
+            # Audio-only file in video mode → add black video canvas
             cmd += [
                 "-f", "lavfi",
                 "-i", "color=c=black:s=1280x720:r=24",
@@ -144,13 +168,12 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
         if a_flag == "aac":
             cmd += ["-b:a", "128k"]
 
-        # Always force MP4 container output
         cmd += ["-f", "mp4", "-movflags", "+faststart", out_path]
 
     else:
         # ── AUDIO MODE ─────────────────────────────────────────────────────
         needs_a = (a_codec is not None) and (a_codec not in SUPPORTED_AUDIO_CODECS)
-        # Native pass: file is already AAC in an m4a/aac container
+
         is_native_audio = (
             file_path.lower().endswith((".m4a", ".aac"))
             and not needs_a
@@ -159,8 +182,17 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
             return file_path
 
         out_path = os.path.splitext(file_path)[0] + "_compat.m4a"
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+
+        # ✅ KEY FIX: validate cache freshness
+        if _compat_is_valid(file_path, out_path):
+            print(f"[ensure_compatible] Using valid cache: {out_path}")
             return out_path
+
+        if os.path.exists(out_path):
+            try:
+                os.remove(out_path)
+            except Exception:
+                pass
 
         a_flag = "copy" if not needs_a else "aac"
         cmd = ["ffmpeg", "-y", "-i", file_path, "-vn", "-c:a", a_flag]
@@ -183,7 +215,6 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
 
     if proc.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
         print(f"[ensure_compatible] ffmpeg error for {file_path}:\n{stderr.decode(errors='replace')}")
-        # Clean up broken output file
         try:
             if os.path.exists(out_path):
                 os.remove(out_path)
@@ -451,13 +482,8 @@ async def stream(
         status       = True if video else None
 
         # ✅ THE CORE FIX — ffprobe reads the REAL codec, not just the extension.
-        #
-        #   This handles ALL of:
-        #   • .mkv with HEVC/VP9/VP8/AV1/MPEG-4 → re-encoded to H.264+AAC in .mp4
-        #   • .mp4 with wrong codec (e.g. HEVC or MP3 audio) → re-encoded
-        #   • .avi .wmv .flv .mov .ts .webm etc. → remuxed/re-encoded to .mp4
-        #   • Audio-only files in video mode → black canvas added automatically
-        #   • Already H.264+AAC in .mp4 → returned instantly (zero cost)
+        # Now with mtime-based cache validation so the 2nd+ play of the same
+        # file_unique_id always gets a fresh compat file if the source changed.
         file_path = await ensure_compatible(file_path, video=bool(video))
 
         if await is_active_chat(chat_id):
