@@ -73,64 +73,28 @@ from SHASHA_DRUGZ.utils import seconds_to_min, time_to_seconds
 from youtubesearchpython.__future__ import VideosSearch
 from config import BANNED_USERS, adminlist, lyrical
 
-# ----------------------------------- GLOBALS -----------------------------------
+# ── All supported media extensions ───────────────────────────────────────────
+ALL_VIDEO_EXTS = {
+    "mp4", "mkv", "webm", "avi", "mov", "wmv", "flv", "mpeg",
+    "mpg", "3gp", "3g2", "ogv", "ts", "mxf", "asf", "divx",
+    "rv", "h264", "hevc", "m2ts", "vob", "m4v",
+}
+ALL_AUDIO_EXTS = {
+    "mp3", "m4a", "aac", "ogg", "opus", "flac", "wav", "wma",
+    "aiff", "aif", "amr", "awb", "ape", "dsd", "tta", "wv",
+    "spx", "mid", "midi", "ra", "au",
+}
+ALL_MEDIA_EXTS = ALL_VIDEO_EXTS | ALL_AUDIO_EXTS
+
+# ── globals ───────────────────────────────────────────────────────────────────
 checker = []
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPER: refresh a Telegram file reference before download
-# ─────────────────────────────────────────────────────────────────────────────
-async def _refresh_file_ref(chat_id: int, message_id: int, is_audio: bool):
-    """
-    Re-fetch the message from Telegram to get a fresh file_reference.
-    Returns the refreshed audio/voice or video/document object, or None on failure.
-    """
-    try:
-        fresh = await app.get_messages(chat_id, message_id)
-        if is_audio:
-            return fresh.audio or fresh.voice
-        else:
-            return fresh.video or fresh.document
-    except Exception as e:
-        print(f"[_refresh_file_ref] Failed to refresh reference: {e}")
-        return None
+# =============================================================================
+#  HANDLERS
+# =============================================================================
 
-
-async def _download_with_retry(_, message, mystic, file_path, media_obj,
-                                chat_id: int, message_id: int, is_audio: bool,
-                                max_retries: int = 2):
-    """
-    Attempt Telegram.download(); on FILE_REFERENCE_EXPIRED re-fetch and retry.
-    Returns True on success, False on failure.
-    """
-    for attempt in range(max_retries + 1):
-        try:
-            result = await Telegram.download(_, message, mystic, file_path)
-            if result:
-                return True, media_obj
-        except Exception as e:
-            err_str = str(e)
-            if "FILE_REFERENCE" in err_str and attempt < max_retries:
-                print(f"[_download_with_retry] FILE_REFERENCE_EXPIRED on attempt "
-                      f"{attempt + 1}, refreshing...")
-                refreshed = await _refresh_file_ref(chat_id, message_id, is_audio)
-                if refreshed:
-                    media_obj = refreshed
-                    # Re-compute file_path for the refreshed object
-                    if is_audio:
-                        file_path = await Telegram.get_filepath(audio=refreshed)
-                    else:
-                        file_path = await Telegram.get_filepath(video=refreshed)
-                continue
-            # Non-retryable error or max retries exceeded
-            print(f"[_download_with_retry] Download failed: {e}")
-            return False, media_obj
-    return False, media_obj
-
-
-# =================================== HANDLERS ===================================
-
-# ------------------------------ channelplay command ----------------------------
+# ─── channelplay ─────────────────────────────────────────────────────────────
 @Client.on_message(filters.command(["channelplay"]) & filters.group & ~BANNED_USERS)
 @AdminActual
 @language
@@ -173,7 +137,7 @@ async def playmode_(client, message: Message, _):
         return await message.reply_text(_["cplay_3"].format(chat.title, chat.id))
 
 
-# ----------------------------------- loop -----------------------------------
+# ─── loop ─────────────────────────────────────────────────────────────────────
 @Client.on_message(filters.command(["loop", "cloop"]) & filters.group & ~BANNED_USERS)
 @AdminRightsCheck
 async def admins(cli, message: Message, _, chat_id):
@@ -212,7 +176,7 @@ async def admins(cli, message: Message, _, chat_id):
         return await message.reply_text(usage)
 
 
-# ----------------------------------- resume -----------------------------------
+# ─── resume ───────────────────────────────────────────────────────────────────
 @Client.on_message(filters.command(["resume", "cresume"]) & filters.group & ~BANNED_USERS)
 @AdminRightsCheck
 async def resume_com(cli, message: Message, _, chat_id):
@@ -227,15 +191,15 @@ async def resume_com(cli, message: Message, _, chat_id):
         ],
         [
             InlineKeyboardButton(text="ᴘᴀᴜsᴇ", callback_data=f"ADMIN Pause|{chat_id}"),
-        ],
+        ]
     ]
     await message.reply_text(
         _["admin_4"].format(message.from_user.mention),
-        reply_markup=InlineKeyboardMarkup(buttons_resume),
+        reply_markup=InlineKeyboardMarkup(buttons_resume)
     )
 
 
-# ----------------------------------- pause -----------------------------------
+# ─── pause ────────────────────────────────────────────────────────────────────
 @Client.on_message(filters.command(["pause", "cpause"]) & filters.group & ~BANNED_USERS)
 @AdminRightsCheck
 async def pause_admin(cli, message: Message, _, chat_id):
@@ -251,11 +215,11 @@ async def pause_admin(cli, message: Message, _, chat_id):
     ]
     await message.reply_text(
         _["admin_2"].format(message.from_user.mention),
-        reply_markup=InlineKeyboardMarkup(buttons),
+        reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 
-# ----------------------------------- speed -----------------------------------
+# ─── speed ────────────────────────────────────────────────────────────────────
 @Client.on_message(
     filters.command(["cspeed", "speed", "cslow", "slow", "playback", "cplayback"])
     & filters.group
@@ -265,15 +229,15 @@ async def pause_admin(cli, message: Message, _, chat_id):
 async def playback(cli, message: Message, _, chat_id):
     playing = db.get(chat_id)
     if not playing:
-        return await cli.send_message(message.chat.id, text=_["queue_2"])
+        return await app.send_message(message.chat.id, text=_["queue_2"])
     duration_seconds = int(playing[0]["seconds"])
     if duration_seconds == 0:
-        return await cli.send_message(message.chat.id, text=_["admin_27"])
+        return await app.send_message(message.chat.id, text=_["admin_27"])
     file_path = playing[0]["file"]
     if "downloads" not in file_path:
-        return await cli.send_message(message.chat.id, text=_["admin_27"])
+        return await app.send_message(message.chat.id, text=_["admin_27"])
     upl = speed_markup(_, chat_id)
-    return await cli.send_message(
+    return await app.send_message(
         message.chat.id,
         text=_["admin_28"].format(app.mention),
         reply_markup=upl,
@@ -323,7 +287,7 @@ async def del_back_playlist(client, callback_query, _):
         await callback_query.answer(_["admin_31"])
     except:
         pass
-    mystic = await client.send_message(
+    mystic = await app.send_message(
         callback_query.message.chat.id,
         text=_["admin_32"].format(callback_query.from_user.mention),
     )
@@ -332,25 +296,25 @@ async def del_back_playlist(client, callback_query, _):
     except:
         if chat_id in checker:
             checker.remove(chat_id)
-        return await client.send_message(
+        return await app.send_message(
             callback_query.message.chat.id,
             text=_["admin_33"],
             reply_markup=close_markup(_),
         )
     if chat_id in checker:
         checker.remove(chat_id)
-    await client.send_message(
+    await app.send_message(
         callback_query.message.chat.id,
         text=_["admin_34"].format(speed, callback_query.from_user.mention),
         reply_markup=close_markup(_),
     )
 
 
-# ----------------------------------- stop -----------------------------------
+# ─── stop ─────────────────────────────────────────────────────────────────────
 @Client.on_message(
     filters.command(
         ["end", "cend"],
-        prefixes=["end", "/", "!", "%", ",", "", ".", "@", "#"],
+        prefixes=["end", "/", "!", "%", ",", "", ".", "@", "#"]
     )
     & filters.group
     & ~BANNED_USERS
@@ -366,11 +330,11 @@ async def stop_music(cli, message: Message, _, chat_id):
     )
 
 
-# ----------------------------------- skip -----------------------------------
+# ─── skip ─────────────────────────────────────────────────────────────────────
 @Client.on_message(
     filters.command(
         ["skip", "cskip", "next", "cnext"],
-        prefixes=["skip", "/", "!", "%", ",", ".", "@", "#"],
+        prefixes=["skip", "/", "!", "%", ",", ".", "@", "#"]
     )
     & filters.group
     & ~BANNED_USERS
@@ -428,9 +392,7 @@ async def skip(cli, message: Message, _, chat_id):
                 await auto_clean(popped)
             if not check:
                 await message.reply_text(
-                    text=_["admin_6"].format(
-                        message.from_user.mention, message.chat.title
-                    ),
+                    text=_["admin_6"].format(message.from_user.mention, message.chat.title),
                     reply_markup=close_markup(_),
                 )
                 try:
@@ -440,14 +402,13 @@ async def skip(cli, message: Message, _, chat_id):
         except:
             try:
                 await message.reply_text(
-                    text=_["admin_6"].format(
-                        message.from_user.mention, message.chat.title
-                    ),
+                    text=_["admin_6"].format(message.from_user.mention, message.chat.title),
                     reply_markup=close_markup(_),
                 )
                 return await SHASHA.stop_stream(chat_id)
             except:
                 return
+
     queued = check[0]["file"]
     title = (check[0]["title"]).title()
     user = check[0]["by"]
@@ -461,6 +422,7 @@ async def skip(cli, message: Message, _, chat_id):
         db[chat_id][0]["seconds"] = check[0]["old_second"]
         db[chat_id][0]["speed_path"] = None
         db[chat_id][0]["speed"] = 1.0
+
     if "live_" in queued:
         n, link = await YouTube.video(videoid, True)
         if n == 0:
@@ -487,6 +449,7 @@ async def skip(cli, message: Message, _, chat_id):
         )
         db[chat_id][0]["mystic"] = run
         db[chat_id][0]["markup"] = "tg"
+
     elif "vid_" in queued:
         mystic = await message.reply_text(_["call_7"], disable_web_page_preview=True)
         try:
@@ -518,6 +481,7 @@ async def skip(cli, message: Message, _, chat_id):
         db[chat_id][0]["mystic"] = run
         db[chat_id][0]["markup"] = "stream"
         await mystic.delete()
+
     elif "index_" in queued:
         try:
             await SHASHA.skip_stream(chat_id, videoid, video=status)
@@ -531,6 +495,7 @@ async def skip(cli, message: Message, _, chat_id):
         )
         db[chat_id][0]["mystic"] = run
         db[chat_id][0]["markup"] = "tg"
+
     else:
         if videoid == "telegram":
             image = None
@@ -548,12 +513,8 @@ async def skip(cli, message: Message, _, chat_id):
         if videoid == "telegram":
             button = stream_markup2(_, chat_id)
             run = await message.reply_photo(
-                photo=config.TELEGRAM_AUDIO_URL
-                if str(streamtype) == "audio"
-                else config.TELEGRAM_VIDEO_URL,
-                caption=_["stream_1"].format(
-                    config.SUPPORT_CHAT, title[:23], check[0]["dur"], user
-                ),
+                photo=config.TELEGRAM_AUDIO_URL if str(streamtype) == "audio" else config.TELEGRAM_VIDEO_URL,
+                caption=_["stream_1"].format(config.SUPPORT_CHAT, title[:23], check[0]["dur"], user),
                 reply_markup=InlineKeyboardMarkup(button),
             )
             db[chat_id][0]["mystic"] = run
@@ -561,12 +522,8 @@ async def skip(cli, message: Message, _, chat_id):
         elif videoid == "soundcloud":
             button = stream_markup2(_, chat_id)
             run = await message.reply_photo(
-                photo=config.SOUNCLOUD_IMG_URL
-                if str(streamtype) == "audio"
-                else config.TELEGRAM_VIDEO_URL,
-                caption=_["stream_1"].format(
-                    config.SUPPORT_CHAT, title[:23], check[0]["dur"], user
-                ),
+                photo=config.SOUNCLOUD_IMG_URL if str(streamtype) == "audio" else config.TELEGRAM_VIDEO_URL,
+                caption=_["stream_1"].format(config.SUPPORT_CHAT, title[:23], check[0]["dur"], user),
                 reply_markup=InlineKeyboardMarkup(button),
             )
             db[chat_id][0]["mystic"] = run
@@ -588,7 +545,7 @@ async def skip(cli, message: Message, _, chat_id):
             db[chat_id][0]["markup"] = "stream"
 
 
-# ----------------------------------- seek -----------------------------------
+# ─── seek ─────────────────────────────────────────────────────────────────────
 @Client.on_message(
     filters.command(["seek", "cseek", "seekback", "cseekback"])
     & filters.group
@@ -637,11 +594,8 @@ async def seek_comm(cli, message: Message, _, chat_id):
         file_path = playing[0]["vidid"]
     try:
         await SHASHA.seek_stream(
-            chat_id,
-            file_path,
-            seconds_to_min(to_seek),
-            duration,
-            playing[0]["streamtype"],
+            chat_id, file_path,
+            seconds_to_min(to_seek), duration, playing[0]["streamtype"],
         )
     except:
         return await mystic.edit_text(_["admin_26"], reply_markup=close_markup(_))
@@ -655,14 +609,14 @@ async def seek_comm(cli, message: Message, _, chat_id):
     )
 
 
-# ----------------------------------- play -----------------------------------
+# ─── play ─────────────────────────────────────────────────────────────────────
 @Client.on_message(
     filters.command(
         [
             "play", "vplay", "cplay", "cvplay",
             "playforce", "vplayforce", "cplayforce", "cvplayforce",
         ],
-        prefixes=["/", "!", "%", "", ".", "@", "#"],
+        prefixes=["/", "!", "%", "", ".", "@", "#"]
     )
     & filters.group
     & ~BANNED_USERS
@@ -689,6 +643,7 @@ async def play_commnd(
     spotify = None
     user_id = message.from_user.id
     user_name = message.from_user.first_name
+
     audio_telegram = (
         (message.reply_to_message.audio or message.reply_to_message.voice)
         if message.reply_to_message
@@ -700,7 +655,7 @@ async def play_commnd(
         else None
     )
 
-    # ── TELEGRAM AUDIO ────────────────────────────────────────────────────────
+    # ── TELEGRAM AUDIO ───────────────────────────────────────────────────────
     if audio_telegram:
         if audio_telegram.file_size > 104857600:
             return await mystic.edit_text(_["play_5"])
@@ -709,117 +664,81 @@ async def play_commnd(
             return await mystic.edit_text(
                 _["play_6"].format(config.DURATION_LIMIT_MIN, app.mention)
             )
-
-        # ✅ FIX: Always refresh the file reference before download to prevent
-        #         FILE_REFERENCE_EXPIRED errors (Telegram references expire quickly).
-        refreshed = await _refresh_file_ref(
-            message.chat.id, message.reply_to_message.id, is_audio=True
-        )
-        if refreshed:
-            audio_telegram = refreshed
-
         file_path = await Telegram.get_filepath(audio=audio_telegram)
-
-        # ✅ FIX: Use retry-capable download wrapper
-        success, audio_telegram = await _download_with_retry(
-            _, message, mystic, file_path, audio_telegram,
-            message.chat.id, message.reply_to_message.id, is_audio=True
-        )
-        if not success:
-            return
-
-        message_link = await Telegram.get_link(message)
-        file_name = await Telegram.get_filename(audio_telegram, audio=True)
-        dur = await Telegram.get_duration(audio_telegram, file_path)
-        details = {
-            "title": file_name,
-            "link": message_link,
-            "path": file_path,
-            "dur": dur,
-        }
-        try:
-            await stream(
-                _,
-                mystic,
-                user_id,
-                details,
-                chat_id,
-                user_name,
-                message.chat.id,
-                client,
-                streamtype="telegram",
-                forceplay=fplay,
-            )
-        except Exception as e:
-            ex_type = type(e).__name__
-            err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
-            print(e)
-            return await mystic.edit_text(err)
-        return await mystic.delete()
+        if await Telegram.download(_, message, mystic, file_path):
+            message_link = await Telegram.get_link(message)
+            file_name = await Telegram.get_filename(audio_telegram, audio=True)
+            dur = await Telegram.get_duration(audio_telegram, file_path)
+            details = {
+                "title": file_name,
+                "link": message_link,
+                "path": file_path,
+                "dur": dur,
+            }
+            try:
+                await stream(
+                    _, mystic, user_id, details, chat_id, user_name,
+                    message.chat.id, streamtype="telegram", forceplay=fplay,
+                )
+            except Exception as e:
+                ex_type = type(e).__name__
+                err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
+                print(e)
+                return await mystic.edit_text(e)
+            return await mystic.delete()
+        return
 
     # ── TELEGRAM VIDEO / DOCUMENT ─────────────────────────────────────────────
     elif video_telegram:
         if message.reply_to_message.document:
             try:
-                ext = video_telegram.file_name.split(".")[-1]
-                if ext.lower() not in formats:
+                fname = video_telegram.file_name or ""
+                ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+                mime = (video_telegram.mime_type or "").lower()
+                is_media = (
+                    ext in ALL_MEDIA_EXTS
+                    or mime.startswith("video/")
+                    or mime.startswith("audio/")
+                )
+                if not is_media:
                     return await mystic.edit_text(
-                        _["play_7"].format(f"{' | '.join(formats)}")
+                        _["play_7"].format(
+                            "mp4 | mkv | avi | mov | wmv | flv | webm | mpeg | "
+                            "3gp | ts | m4v | mp3 | m4a | aac | ogg | opus | flac | wav"
+                        )
                     )
-            except:
+            except Exception:
                 return await mystic.edit_text(
-                    _["play_7"].format(f"{' | '.join(formats)}")
+                    _["play_7"].format(
+                        "mp4 | mkv | avi | mov | wmv | flv | webm | mpeg | "
+                        "3gp | ts | m4v | mp3 | m4a | aac | ogg | opus | flac | wav"
+                    )
                 )
         if video_telegram.file_size > config.TG_VIDEO_FILESIZE_LIMIT:
             return await mystic.edit_text(_["play_8"])
-
-        # ✅ FIX: Always refresh the file reference before download to prevent
-        #         FILE_REFERENCE_EXPIRED errors.
-        refreshed = await _refresh_file_ref(
-            message.chat.id, message.reply_to_message.id, is_audio=False
-        )
-        if refreshed:
-            video_telegram = refreshed
-
         file_path = await Telegram.get_filepath(video=video_telegram)
-
-        # ✅ FIX: Use retry-capable download wrapper
-        success, video_telegram = await _download_with_retry(
-            _, message, mystic, file_path, video_telegram,
-            message.chat.id, message.reply_to_message.id, is_audio=False
-        )
-        if not success:
-            return
-
-        message_link = await Telegram.get_link(message)
-        file_name = await Telegram.get_filename(video_telegram)
-        dur = await Telegram.get_duration(video_telegram, file_path)
-        details = {
-            "title": file_name,
-            "link": message_link,
-            "path": file_path,
-            "dur": dur,
-        }
-        try:
-            await stream(
-                _,
-                mystic,
-                user_id,
-                details,
-                chat_id,
-                user_name,
-                message.chat.id,
-                client,
-                video=True,
-                streamtype="telegram",
-                forceplay=fplay,
-            )
-        except Exception as e:
-            ex_type = type(e).__name__
-            err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
-            print(e)
-            return await mystic.edit_text(err)
-        return await mystic.delete()
+        if await Telegram.download(_, message, mystic, file_path):
+            message_link = await Telegram.get_link(message)
+            file_name = await Telegram.get_filename(video_telegram)
+            dur = await Telegram.get_duration(video_telegram, file_path)
+            details = {
+                "title": file_name,
+                "link": message_link,
+                "path": file_path,
+                "dur": dur,
+            }
+            try:
+                await stream(
+                    _, mystic, user_id, details, chat_id, user_name,
+                    message.chat.id, video=True, streamtype="telegram", forceplay=fplay,
+                )
+            except Exception as e:
+                ex_type = type(e).__name__
+                err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
+                print(e)
+                return await mystic.edit_text(e)
+            return await mystic.delete()
+        return
 
     # ── URL HANDLING ──────────────────────────────────────────────────────────
     elif url:
@@ -856,12 +775,8 @@ async def play_commnd(
                         streamtype = "playlist"
                         img = details["thumb"]
                         cap = _["play_10"].format(details["title"], details["duration_min"])
-                        await queue_video_for_playback(
-                            video_url, details, track_id, streamtype, img, cap
-                        )
-                    await mystic.edit_text(
-                        "All videos from the channel have been added to the queue."
-                    )
+                        await queue_video_for_playback(video_url, details, track_id, streamtype, img, cap)
+                    await mystic.edit_text("All videos from the channel have been added to the queue.")
                 except Exception as e:
                     print(e)
                     await mystic.edit_text(_["play_3"])
@@ -958,22 +873,14 @@ async def play_commnd(
                 )
             try:
                 await stream(
-                    _,
-                    mystic,
-                    user_id,
-                    details,
-                    chat_id,
-                    user_name,
-                    message.chat.id,
-                    client,
-                    streamtype="soundcloud",
-                    forceplay=fplay,
+                    _, mystic, user_id, details, chat_id, user_name,
+                    message.chat.id, streamtype="soundcloud", forceplay=fplay,
                 )
             except Exception as e:
                 ex_type = type(e).__name__
                 err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
                 print(e)
-                return await mystic.edit_text(err)
+                return await mystic.edit_text(e)
             return await mystic.delete()
         elif await Instagram.valid(url):
             try:
@@ -989,9 +896,8 @@ async def play_commnd(
                 await SHASHA.stream_call(url)
             except NoActiveGroupCall:
                 await mystic.edit_text(_["black_9"])
-                return await client.send_message(
-                    chat_id=config.LOGGER_ID,
-                    text=_["play_17"],
+                return await app.send_message(
+                    chat_id=config.LOGGER_ID, text=_["play_17"],
                 )
             except Exception as e:
                 print(e)
@@ -999,23 +905,15 @@ async def play_commnd(
             await mystic.edit_text(_["str_2"])
             try:
                 await stream(
-                    _,
-                    mystic,
-                    message.from_user.id,
-                    url,
-                    chat_id,
-                    message.from_user.first_name,
-                    message.chat.id,
-                    client,
-                    video=video,
-                    streamtype="index",
-                    forceplay=fplay,
+                    _, mystic, message.from_user.id, url, chat_id,
+                    message.from_user.first_name, message.chat.id,
+                    video=video, streamtype="index", forceplay=fplay,
                 )
             except Exception as e:
                 ex_type = type(e).__name__
                 err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
                 print(e)
-                return await mystic.edit_text(err)
+                return await mystic.edit_text(e)
             return await play_logs(message, streamtype="M3u8 or Index Link")
     else:
         if len(message.command) < 2:
@@ -1044,9 +942,7 @@ async def play_commnd(
                     )
             else:
                 buttons = livestream_markup(
-                    _,
-                    track_id,
-                    user_id,
+                    _, track_id, user_id,
                     "v" if video else "a",
                     "c" if channel else "g",
                     "f" if fplay else "d",
@@ -1057,24 +953,14 @@ async def play_commnd(
                 )
         try:
             await stream(
-                _,
-                mystic,
-                user_id,
-                details,
-                chat_id,
-                user_name,
-                message.chat.id,
-                client,
-                video=video,
-                streamtype=streamtype,
-                spotify=spotify,
-                forceplay=fplay,
+                _, mystic, user_id, details, chat_id, user_name, message.chat.id,
+                video=video, streamtype=streamtype, spotify=spotify, forceplay=fplay,
             )
         except Exception as e:
             ex_type = type(e).__name__
             err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
             print(e)
-            return await mystic.edit_text(err)
+            return await mystic.edit_text(e)
         await mystic.delete()
         return await play_logs(message, streamtype=streamtype)
     else:
@@ -1084,60 +970,45 @@ async def play_commnd(
             )
             lyrical[ran_hash] = plist_id
             buttons = playlist_markup(
-                _,
-                ran_hash,
-                message.from_user.id,
-                plist_type,
-                "c" if channel else "g",
-                "f" if fplay else "d",
+                _, ran_hash, message.from_user.id, plist_type,
+                "c" if channel else "g", "f" if fplay else "d",
             )
             await mystic.delete()
             await message.reply_photo(
-                photo=img,
-                caption=cap,
+                photo=img, caption=cap,
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
             return await play_logs(message, streamtype=f"Playlist : {plist_type}")
         else:
             if slider:
                 buttons = slider_markup(
-                    _,
-                    track_id,
-                    message.from_user.id,
-                    query,
-                    0,
-                    "c" if channel else "g",
-                    "f" if fplay else "d",
+                    _, track_id, message.from_user.id, query, 0,
+                    "c" if channel else "g", "f" if fplay else "d",
                 )
                 await mystic.delete()
                 await message.reply_photo(
                     photo=details["thumb"],
                     caption=_["play_10"].format(
-                        details["title"].title(),
-                        details["duration_min"],
+                        details["title"].title(), details["duration_min"],
                     ),
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
                 return await play_logs(message, streamtype="Searched on Youtube")
             else:
                 buttons = track_markup(
-                    _,
-                    track_id,
-                    message.from_user.id,
-                    "c" if channel else "g",
-                    "f" if fplay else "d",
+                    _, track_id, message.from_user.id,
+                    "c" if channel else "g", "f" if fplay else "d",
                 )
                 await mystic.delete()
                 thumb = await get_thumb(track_id)
                 await message.reply_photo(
-                    photo=thumb,
-                    caption=cap,
+                    photo=thumb, caption=cap,
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
                 return await play_logs(message, streamtype="URL Searched Inline")
 
 
-# ----------------------------------- play callbacks -----------------------------------
+# ── callbacks ─────────────────────────────────────────────────────────────────
 @Client.on_callback_query(filters.regex("MusicStream") & ~BANNED_USERS)
 @languageCB
 async def play_music(client, CallbackQuery, _):
@@ -1174,12 +1045,8 @@ async def play_music(client, CallbackQuery, _):
             )
     else:
         buttons = livestream_markup(
-            _,
-            track_id,
-            CallbackQuery.from_user.id,
-            mode,
-            "c" if cplay == "c" else "g",
-            "f" if fplay else "d",
+            _, track_id, CallbackQuery.from_user.id, mode,
+            "c" if cplay == "c" else "g", "f" if fplay else "d",
         )
         return await mystic.edit_text(
             _["play_13"],
@@ -1189,23 +1056,14 @@ async def play_music(client, CallbackQuery, _):
     ffplay = True if fplay == "f" else None
     try:
         await stream(
-            _,
-            mystic,
-            CallbackQuery.from_user.id,
-            details,
-            chat_id,
-            user_name,
-            CallbackQuery.message.chat.id,
-            client,
-            video,
-            streamtype="youtube",
-            forceplay=ffplay,
+            _, mystic, CallbackQuery.from_user.id, details, chat_id, user_name,
+            CallbackQuery.message.chat.id, video, streamtype="youtube", forceplay=ffplay,
         )
     except Exception as e:
         ex_type = type(e).__name__
         err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
         print(e)
-        return await mystic.edit_text(err)
+        return await mystic.edit_text(e)
     return await mystic.delete()
 
 
@@ -1225,14 +1083,7 @@ async def SHASHAmous_check(client, CallbackQuery):
 async def play_playlists_command(client, CallbackQuery, _):
     callback_data = CallbackQuery.data.strip()
     callback_request = callback_data.split(None, 1)[1]
-    (
-        videoid,
-        user_id,
-        ptype,
-        mode,
-        cplay,
-        fplay,
-    ) = callback_request.split("|")
+    (videoid, user_id, ptype, mode, cplay, fplay,) = callback_request.split("|")
     if CallbackQuery.from_user.id != int(user_id):
         try:
             return await CallbackQuery.answer(_["playcb_1"], show_alert=True)
@@ -1285,24 +1136,15 @@ async def play_playlists_command(client, CallbackQuery, _):
             return await mystic.edit_text(_["play_3"])
     try:
         await stream(
-            _,
-            mystic,
-            user_id,
-            result,
-            chat_id,
-            user_name,
-            CallbackQuery.message.chat.id,
-            client,
-            video,
-            streamtype="playlist",
-            spotify=spotify,
-            forceplay=ffplay,
+            _, mystic, user_id, result, chat_id, user_name,
+            CallbackQuery.message.chat.id, video,
+            streamtype="playlist", spotify=spotify, forceplay=ffplay,
         )
     except Exception as e:
         ex_type = type(e).__name__
         err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
         print(e)
-        return await mystic.edit_text(err)
+        return await mystic.edit_text(e)
     return await mystic.delete()
 
 
@@ -1311,14 +1153,7 @@ async def play_playlists_command(client, CallbackQuery, _):
 async def slider_queries(client, CallbackQuery, _):
     callback_data = CallbackQuery.data.strip()
     callback_request = callback_data.split(None, 1)[1]
-    (
-        what,
-        rtype,
-        query,
-        user_id,
-        cplay,
-        fplay,
-    ) = callback_request.split("|")
+    (what, rtype, query, user_id, cplay, fplay,) = callback_request.split("|")
     if CallbackQuery.from_user.id != int(user_id):
         try:
             return await CallbackQuery.answer(_["playcb_1"], show_alert=True)
@@ -1343,7 +1178,9 @@ async def slider_queries(client, CallbackQuery, _):
         )
 
 
-# =================================== STREAM FUNCTION ===================================
+# =============================================================================
+#  LOCAL STREAM DISPATCHER
+# =============================================================================
 async def stream(
     _,
     mystic,
@@ -1352,7 +1189,6 @@ async def stream(
     chat_id,
     user_name,
     original_chat_id,
-    client,                        # ← deployed bot's pyrogram client
     video: Union[bool, str] = None,
     streamtype: Union[bool, str] = None,
     spotify: Union[bool, str] = None,
@@ -1363,7 +1199,7 @@ async def stream(
     if forceplay:
         await SHASHA.force_stop_stream(chat_id)
 
-    # ------------------------------------------------------------------ playlist
+    # ── PLAYLIST ─────────────────────────────────────────────────────────────
     if streamtype == "playlist":
         msg = f"{_['play_19']}\n\n"
         count = 0
@@ -1371,13 +1207,8 @@ async def stream(
             if int(count) == config.PLAYLIST_FETCH_LIMIT:
                 continue
             try:
-                (
-                    title,
-                    duration_min,
-                    duration_sec,
-                    thumbnail,
-                    vidid,
-                ) = await YouTube.details(search, False if spotify else True)
+                (title, duration_min, duration_sec, thumbnail, vidid,) = \
+                    await YouTube.details(search, False if spotify else True)
             except:
                 continue
             if str(duration_min) == "None":
@@ -1386,15 +1217,8 @@ async def stream(
                 continue
             if await is_active_chat(chat_id):
                 await put_queue(
-                    chat_id,
-                    original_chat_id,
-                    f"vid_{vidid}",
-                    title,
-                    duration_min,
-                    user_name,
-                    vidid,
-                    user_id,
-                    "video" if video else "audio",
+                    chat_id, original_chat_id, f"vid_{vidid}", title, duration_min,
+                    user_name, vidid, user_id, "video" if video else "audio",
                 )
                 position = len(db.get(chat_id)) - 1
                 count += 1
@@ -1411,34 +1235,22 @@ async def stream(
                 except:
                     raise AssistantErr(_["play_14"])
                 await SHASHA.join_call(
-                    chat_id,
-                    original_chat_id,
-                    file_path,
-                    video=status,
-                    image=thumbnail,
+                    chat_id, original_chat_id, file_path, video=status, image=thumbnail,
                 )
                 await put_queue(
-                    chat_id,
-                    original_chat_id,
+                    chat_id, original_chat_id,
                     file_path if direct else f"vid_{vidid}",
-                    title,
-                    duration_min,
-                    user_name,
-                    vidid,
-                    user_id,
-                    "video" if video else "audio",
-                    forceplay=forceplay,
+                    title, duration_min, user_name, vidid, user_id,
+                    "video" if video else "audio", forceplay=forceplay,
                 )
                 img = await get_thumb(vidid)
                 button = stream_markup(_, vidid, chat_id)
-                run = await client.send_photo(
+                run = await app.send_photo(
                     original_chat_id,
                     photo=img,
                     caption=_["stream_1"].format(
                         f"https://t.me/{app.username}?start=info_{vidid}",
-                        title[:11],
-                        duration_min,
-                        user_name,
+                        title[:11], duration_min, user_name,
                     ),
                     reply_markup=InlineKeyboardMarkup(button),
                 )
@@ -1455,14 +1267,14 @@ async def stream(
                 car = msg
             carbon = await Carbon.generate(car, randint(100, 10000000))
             upl = close_markup(_)
-            return await client.send_photo(
+            return await app.send_photo(
                 original_chat_id,
                 photo=carbon,
                 caption=_["play_21"].format(position, link),
                 reply_markup=upl,
             )
 
-    # ------------------------------------------------------------------ youtube
+    # ── YOUTUBE ───────────────────────────────────────────────────────────────
     elif streamtype == "youtube":
         link = result["link"]
         vidid = result["vidid"]
@@ -1478,20 +1290,15 @@ async def stream(
             raise AssistantErr(_["play_14"])
         if await is_active_chat(chat_id):
             await put_queue(
-                chat_id,
-                original_chat_id,
+                chat_id, original_chat_id,
                 file_path if direct else f"vid_{vidid}",
-                title,
-                duration_min,
-                user_name,
-                vidid,
-                user_id,
+                title, duration_min, user_name, vidid, user_id,
                 "video" if video else "audio",
             )
             img = await get_thumb(vidid)
             position = len(db.get(chat_id)) - 1
             button = aq_markup(_, chat_id)
-            await client.send_photo(
+            await app.send_photo(
                 chat_id=original_chat_id,
                 photo=img,
                 caption=_["queue_4"].format(position, title[:11], duration_min, user_name),
@@ -1501,41 +1308,29 @@ async def stream(
             if not forceplay:
                 db[chat_id] = []
             await SHASHA.join_call(
-                chat_id,
-                original_chat_id,
-                file_path,
-                video=status,
-                image=thumbnail,
+                chat_id, original_chat_id, file_path, video=status, image=thumbnail,
             )
             await put_queue(
-                chat_id,
-                original_chat_id,
+                chat_id, original_chat_id,
                 file_path if direct else f"vid_{vidid}",
-                title,
-                duration_min,
-                user_name,
-                vidid,
-                user_id,
-                "video" if video else "audio",
-                forceplay=forceplay,
+                title, duration_min, user_name, vidid, user_id,
+                "video" if video else "audio", forceplay=forceplay,
             )
             img = await get_thumb(vidid)
             button = stream_markup(_, vidid, chat_id)
-            run = await client.send_photo(
+            run = await app.send_photo(
                 original_chat_id,
                 photo=img,
                 caption=_["stream_1"].format(
                     f"https://t.me/{app.username}?start=info_{vidid}",
-                    title[:11],
-                    duration_min,
-                    user_name,
+                    title[:11], duration_min, user_name,
                 ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "stream"
 
-    # ------------------------------------------------------------------ instagram
+    # ── INSTAGRAM ─────────────────────────────────────────────────────────────
     elif streamtype == "instagram":
         ig_url = result["link"]
         vidid = result["vidid"]
@@ -1556,19 +1351,12 @@ async def stream(
             raise AssistantErr(_["play_14"])
         if await is_active_chat(chat_id):
             await put_queue(
-                chat_id,
-                original_chat_id,
-                file_path,
-                title,
-                duration_min,
-                user_name,
-                vidid,
-                user_id,
-                "video" if video else "audio",
+                chat_id, original_chat_id, file_path, title, duration_min,
+                user_name, vidid, user_id, "video" if video else "audio",
             )
             position = len(db.get(chat_id)) - 1
             button = aq_markup(_, chat_id)
-            await client.send_photo(
+            await app.send_photo(
                 chat_id=original_chat_id,
                 photo=thumbnail,
                 caption=_["queue_4"].format(position, title[:11], duration_min, user_name),
@@ -1581,19 +1369,12 @@ async def stream(
                 chat_id, original_chat_id, file_path, video=status, image=thumbnail,
             )
             await put_queue(
-                chat_id,
-                original_chat_id,
-                file_path,
-                title,
-                duration_min,
-                user_name,
-                vidid,
-                user_id,
-                "video" if video else "audio",
+                chat_id, original_chat_id, file_path, title, duration_min,
+                user_name, vidid, user_id, "video" if video else "audio",
                 forceplay=forceplay,
             )
             button = stream_markup2(_, chat_id)
-            run = await client.send_photo(
+            run = await app.send_photo(
                 original_chat_id,
                 photo=thumbnail,
                 caption=_["stream_1"].format(ig_url, title[:11], duration_min, user_name),
@@ -1602,26 +1383,19 @@ async def stream(
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
 
-    # ------------------------------------------------------------------ soundcloud
+    # ── SOUNDCLOUD ───────────────────────────────────────────────────────────
     elif streamtype == "soundcloud":
         file_path = result["filepath"]
         title = result["title"]
         duration_min = result["duration_min"]
         if await is_active_chat(chat_id):
             await put_queue(
-                chat_id,
-                original_chat_id,
-                file_path,
-                title,
-                duration_min,
-                user_name,
-                streamtype,
-                user_id,
-                "audio",
+                chat_id, original_chat_id, file_path, title, duration_min,
+                user_name, streamtype, user_id, "audio",
             )
             position = len(db.get(chat_id)) - 1
             button = aq_markup(_, chat_id)
-            await client.send_message(
+            await app.send_message(
                 chat_id=original_chat_id,
                 text=_["queue_4"].format(position, title[:11], duration_min, user_name),
                 reply_markup=InlineKeyboardMarkup(button),
@@ -1631,19 +1405,11 @@ async def stream(
                 db[chat_id] = []
             await SHASHA.join_call(chat_id, original_chat_id, file_path, video=None)
             await put_queue(
-                chat_id,
-                original_chat_id,
-                file_path,
-                title,
-                duration_min,
-                user_name,
-                streamtype,
-                user_id,
-                "audio",
-                forceplay=forceplay,
+                chat_id, original_chat_id, file_path, title, duration_min,
+                user_name, streamtype, user_id, "audio", forceplay=forceplay,
             )
             button = stream_markup2(_, chat_id)
-            run = await client.send_photo(
+            run = await app.send_photo(
                 original_chat_id,
                 photo=config.SOUNCLOUD_IMG_URL,
                 caption=_["stream_1"].format(
@@ -1654,7 +1420,7 @@ async def stream(
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
 
-    # ------------------------------------------------------------------ telegram
+    # ── TELEGRAM ─────────────────────────────────────────────────────────────
     elif streamtype == "telegram":
         file_path    = result["path"]
         link         = result["link"]
@@ -1662,34 +1428,18 @@ async def stream(
         duration_min = result["dur"]
         status       = True if video else None
 
-        # ✅ FIX: Validate file before processing — catch corrupt/empty downloads
-        if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-            raise AssistantErr(_["play_14"])
-
-        # ✅ FIX: Re-encode unsupported codecs BEFORE calling join_call.
-        #         mtime-based cache validation ensures stale compat files are rebuilt.
+        # ✅ THE FIX — re-encode unsupported codecs BEFORE calling join_call.
+        # mtime-based cache validation ensures stale compat files are rebuilt.
         file_path = await ensure_compatible(file_path, video=bool(video))
-
-        # ✅ FIX: If ensure_compatible returned the original and it's still corrupt,
-        #         don't attempt to play — pytgcalls will throw NoAudioSourceFound
-        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-            raise AssistantErr(_["play_14"])
 
         if await is_active_chat(chat_id):
             await put_queue(
-                chat_id,
-                original_chat_id,
-                file_path,
-                title,
-                duration_min,
-                user_name,
-                streamtype,
-                user_id,
-                "video" if video else "audio",
+                chat_id, original_chat_id, file_path, title, duration_min,
+                user_name, streamtype, user_id, "video" if video else "audio",
             )
             position = len(db.get(chat_id)) - 1
             button = aq_markup(_, chat_id)
-            await client.send_message(
+            await app.send_message(
                 chat_id=original_chat_id,
                 text=_["queue_4"].format(position, title[:11], duration_min, user_name),
                 reply_markup=InlineKeyboardMarkup(button),
@@ -1699,21 +1449,14 @@ async def stream(
                 db[chat_id] = []
             await SHASHA.join_call(chat_id, original_chat_id, file_path, video=status)
             await put_queue(
-                chat_id,
-                original_chat_id,
-                file_path,
-                title,
-                duration_min,
-                user_name,
-                streamtype,
-                user_id,
-                "video" if video else "audio",
+                chat_id, original_chat_id, file_path, title, duration_min,
+                user_name, streamtype, user_id, "video" if video else "audio",
                 forceplay=forceplay,
             )
             if video:
                 await add_active_video_chat(chat_id)
             button = stream_markup2(_, chat_id)
-            run = await client.send_photo(
+            run = await app.send_photo(
                 original_chat_id,
                 photo=config.TELEGRAM_VIDEO_URL if video else config.TELEGRAM_AUDIO_URL,
                 caption=_["stream_1"].format(link, title[:11], duration_min, user_name),
@@ -1722,7 +1465,7 @@ async def stream(
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
 
-    # ------------------------------------------------------------------ live
+    # ── LIVE ─────────────────────────────────────────────────────────────────
     elif streamtype == "live":
         link = result["link"]
         vidid = result["vidid"]
@@ -1732,19 +1475,12 @@ async def stream(
         status = True if video else None
         if await is_active_chat(chat_id):
             await put_queue(
-                chat_id,
-                original_chat_id,
-                f"live_{vidid}",
-                title,
-                duration_min,
-                user_name,
-                vidid,
-                user_id,
-                "video" if video else "audio",
+                chat_id, original_chat_id, f"live_{vidid}", title, duration_min,
+                user_name, vidid, user_id, "video" if video else "audio",
             )
             position = len(db.get(chat_id)) - 1
             button = aq_markup(_, chat_id)
-            await client.send_message(
+            await app.send_message(
                 chat_id=original_chat_id,
                 text=_["queue_4"].format(position, title[:11], duration_min, user_name),
                 reply_markup=InlineKeyboardMarkup(button),
@@ -1756,55 +1492,37 @@ async def stream(
             if n == 0:
                 raise AssistantErr(_["str_3"])
             await SHASHA.join_call(
-                chat_id,
-                original_chat_id,
-                file_path,
-                video=status,
+                chat_id, original_chat_id, file_path, video=status,
                 image=thumbnail if thumbnail else None,
             )
             await put_queue(
-                chat_id,
-                original_chat_id,
-                f"live_{vidid}",
-                title,
-                duration_min,
-                user_name,
-                vidid,
-                user_id,
-                "video" if video else "audio",
+                chat_id, original_chat_id, f"live_{vidid}", title, duration_min,
+                user_name, vidid, user_id, "video" if video else "audio",
                 forceplay=forceplay,
             )
             img = await get_thumb(vidid)
             button = stream_markup2(_, chat_id)
-            run = await client.send_photo(
+            run = await app.send_photo(
                 original_chat_id,
                 photo=img,
                 caption=_["stream_1"].format(
                     f"https://t.me/{app.username}?start=info_{vidid}",
-                    title[:11],
-                    duration_min,
-                    user_name,
+                    title[:11], duration_min, user_name,
                 ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
             db[chat_id][0]["mystic"] = run
             db[chat_id][0]["markup"] = "tg"
 
-    # ------------------------------------------------------------------ index / m3u8
+    # ── INDEX / M3U8 ─────────────────────────────────────────────────────────
     elif streamtype == "index":
         link = result
         title = "ɪɴᴅᴇx ᴏʀ ᴍ3ᴜ8 ʟɪɴᴋ"
         duration_min = "00:00"
         if await is_active_chat(chat_id):
             await put_queue_index(
-                chat_id,
-                original_chat_id,
-                "index_url",
-                title,
-                duration_min,
-                user_name,
-                link,
-                "video" if video else "audio",
+                chat_id, original_chat_id, "index_url", title, duration_min,
+                user_name, link, "video" if video else "audio",
             )
             position = len(db.get(chat_id)) - 1
             button = aq_markup(_, chat_id)
@@ -1816,24 +1534,14 @@ async def stream(
             if not forceplay:
                 db[chat_id] = []
             await SHASHA.join_call(
-                chat_id,
-                original_chat_id,
-                link,
-                video=True if video else None,
+                chat_id, original_chat_id, link, video=True if video else None,
             )
             await put_queue_index(
-                chat_id,
-                original_chat_id,
-                "index_url",
-                title,
-                duration_min,
-                user_name,
-                link,
-                "video" if video else "audio",
-                forceplay=forceplay,
+                chat_id, original_chat_id, "index_url", title, duration_min,
+                user_name, link, "video" if video else "audio", forceplay=forceplay,
             )
             button = stream_markup2(_, chat_id)
-            run = await client.send_photo(
+            run = await app.send_photo(
                 original_chat_id,
                 photo=config.STREAM_IMG_URL,
                 caption=_["stream_2"].format(user_name),
@@ -1844,7 +1552,7 @@ async def stream(
             await mystic.delete()
 
 
-# ----------------------------------- HELP TEXT -----------------------------------
+# ── help text ─────────────────────────────────────────────────────────────────
 __menu__ = "CMD_MUSIC"
 __mod_name__ = "H_B_22"
 __help__ = """
@@ -1875,6 +1583,7 @@ __help__ = """
 📢 ᴄʜᴀɴɴᴇʟ ᴘʟᴀʏ
 🔻 /channelplay [channel username/id or linked or disable]
 """
+
 MOD_TYPE = "MUSIC"
 MOD_NAME = "MUSIC-BOT"
 MOD_PRICE = "250"
