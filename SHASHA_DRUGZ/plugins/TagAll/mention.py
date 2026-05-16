@@ -291,12 +291,12 @@ async def tag_all_users(client, message: Message):
             if chat_id not in MENTION_ACTIVE:
                 break
 
-            user_mention = f"[{member.user.first_name}](tg://user?id={member.user.id})"
+            user_mention = f"✫ | [{member.user.first_name}](tg://user?id={member.user.id})\n"
             user_chunk.append(user_mention)
 
             if len(user_chunk) == batch_size:
                 mention_text = "\n".join(user_chunk)
-                final_msg = f"{text_to_send}\n{mention_text}" if text_to_send else mention_text
+                final_msg = f"<blockquote>{text_to_send}</blockquote>\n\n<blockquote>{mention_text}</blockquote>" if text_to_send else mention_text
                 sent = await safe_send(chat_id, final_msg, reply_to=replied)
                 if not sent:
                     # Channel became invalid mid-tag; abort
@@ -309,7 +309,7 @@ async def tag_all_users(client, message: Message):
         # Send remaining users
         if user_chunk and chat_id in MENTION_ACTIVE:
             mention_text = "\n".join(user_chunk)
-            final_msg = f"{text_to_send}\n{mention_text}" if text_to_send else mention_text
+            final_msg = f"<blockquote>{text_to_send}</blockquote>\n\n<blockquote>{mention_text}</blockquote>" if text_to_send else mention_text
             sent = await safe_send(chat_id, final_msg, reply_to=replied)
             if sent and chat_id in NORMAL_TAG_DATA:
                 NORMAL_TAG_DATA[chat_id]['total_count'] += len(user_chunk)
@@ -420,12 +420,12 @@ async def utag_all_users(client, message: Message):
                 if not UTAG_ACTIVE.get(chat_id):
                     break
 
-                user_mention = f"[{member.user.first_name}](tg://user?id={member.user.id})"
+                user_mention = f"✰ | [{member.user.first_name}](tg://user?id={member.user.id})\n"
                 user_chunk.append(user_mention)
 
                 if len(user_chunk) == batch_size:
                     mention_text = "\n".join(user_chunk)
-                    final_msg = f"{text}\n{mention_text}" if text else mention_text
+                    final_msg = f"<blockquote>{text}</blockquote>\n\n<blockquote>{mention_text}</blockquote>" if text else mention_text
                     sent = await safe_send(chat_id, final_msg)
                     if not sent:
                         # Send failed (channel gone); stop loop
