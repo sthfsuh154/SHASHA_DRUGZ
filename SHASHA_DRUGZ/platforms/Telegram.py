@@ -3,6 +3,7 @@ import mimetypes
 import os
 import time
 from typing import Union
+from pyrogram.errors import FileReferenceExpired
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Voice
 import config
 from SHASHA_DRUGZ import app
@@ -234,7 +235,6 @@ class TeleAPI:
                 os.remove(fname)
             except Exception:
                 pass
-            # Also wipe any stale compat files so ensure_compatible rebuilds them
             for suffix in ("_compat.mp4", "_compat.m4a"):
                 compat = os.path.splitext(fname)[0] + suffix
                 if os.path.exists(compat):
@@ -243,35 +243,39 @@ class TeleAPI:
                     except Exception:
                         pass
 
-        # ── track whether the download actually succeeded ─────────────────
         _download_ok = {"ok": False}
 
-        async def down_load():
+        async def _do_download(media_obj):
+            """Run the actual download_media call with progress reporting."""
             async def progress(current, total):
                 if current == total:
                     return
                 current_time = time.time()
                 start_time   = speed_counter.get(message.id)
-                check_time   = current_time - start_time
+                if not start_time:
+                    return
+                check_time = current_time - start_time
+                if check_time <= 0:
+                    return
                 upl = InlineKeyboardMarkup(
                     [[InlineKeyboardButton(text="ᴄᴀɴᴄᴇʟ", callback_data="stop_downloading")]]
                 )
-                percentage    = current * 100 / total
-                percentage    = str(round(percentage, 2))
-                speed         = current / check_time
-                eta           = int((total - current) / speed)
-                eta           = get_readable_time(eta)
+                percentage     = current * 100 / total
+                percentage_str = str(round(percentage, 2))
+                speed_val      = current / check_time
+                eta            = int((total - current) / speed_val)
+                eta            = get_readable_time(eta)
                 if not eta:
                     eta = "0 sᴇᴄᴏɴᴅs"
                 total_size     = convert_bytes(total)
                 completed_size = convert_bytes(current)
-                speed          = convert_bytes(speed)
-                percentage     = int((percentage.split("."))[0])
+                speed_str      = convert_bytes(speed_val)
+                percentage_int = int((percentage_str.split("."))[0])
                 for counter in range(7):
                     low   = int(lower[counter])
                     high  = int(higher[counter])
                     check = int(checker[counter])
-                    if low < percentage <= high:
+                    if low < percentage_int <= high:
                         if high == check:
                             try:
                                 await mystic.edit_text(
@@ -279,8 +283,8 @@ class TeleAPI:
                                         app.mention,
                                         total_size,
                                         completed_size,
-                                        percentage,
-                                        speed,
+                                        percentage_int,
+                                        speed_str,
                                         eta,
                                     ),
                                     reply_markup=upl,
@@ -289,28 +293,49 @@ class TeleAPI:
                             except Exception:
                                 pass
 
+            await app.download_media(media_obj, file_name=fname, progress=progress)
+
+        async def down_load():
             speed_counter[message.id] = time.time()
+            media_obj = message.reply_to_message
+
             try:
-                await app.download_media(
-                    message.reply_to_message,
-                    file_name=fname,
-                    progress=progress,
-                )
-                # ✅ FIX: validate the file is real and non-empty
-                if not os.path.exists(fname) or os.path.getsize(fname) == 0:
-                    raise ValueError("Downloaded file is empty or missing")
+                await _do_download(media_obj)
+
+            except FileReferenceExpired:
+                # ✅ FIX: Re-fetch the message to refresh the expired file reference,
+                #         then retry the download once with the fresh reference.
                 try:
-                    elapsed = get_readable_time(
-                        int(time.time()) - int(speed_counter[message.id])
+                    fresh_msg = await app.get_messages(
+                        message.chat.id,
+                        message.reply_to_message.id,
                     )
-                except Exception:
-                    elapsed = "0 sᴇᴄᴏɴᴅs"
-                await mystic.edit_text(_["tg_2"].format(elapsed))
-                _download_ok["ok"] = True
-            except Exception as e:
-                # ✅ FIX: pop from lyrical so download() returns False on failure
+                    if fresh_msg:
+                        # Wipe any partial download before retrying
+                        if os.path.exists(fname):
+                            try:
+                                os.remove(fname)
+                            except Exception:
+                                pass
+                        await _do_download(fresh_msg)
+                    else:
+                        raise ValueError("Could not refresh file reference")
+                except Exception as retry_err:
+                    config.lyrical.pop(mystic.id, None)
+                    if os.path.exists(fname):
+                        try:
+                            os.remove(fname)
+                        except Exception:
+                            pass
+                    try:
+                        await mystic.edit_text(_["tg_3"])
+                    except Exception:
+                        pass
+                    return
+
+            except Exception:
+                # Any other download error — signal failure and clean up
                 config.lyrical.pop(mystic.id, None)
-                # Clean up any partial/corrupt file
                 if os.path.exists(fname):
                     try:
                         os.remove(fname)
@@ -320,18 +345,43 @@ class TeleAPI:
                     await mystic.edit_text(_["tg_3"])
                 except Exception:
                     pass
+                return
+
+            # ✅ Validate: file must exist and be non-empty
+            if not os.path.exists(fname) or os.path.getsize(fname) == 0:
+                config.lyrical.pop(mystic.id, None)
+                if os.path.exists(fname):
+                    try:
+                        os.remove(fname)
+                    except Exception:
+                        pass
+                try:
+                    await mystic.edit_text(_["tg_3"])
+                except Exception:
+                    pass
+                return
+
+            try:
+                elapsed = get_readable_time(
+                    int(time.time()) - int(speed_counter[message.id])
+                )
+            except Exception:
+                elapsed = "0 sᴇᴄᴏɴᴅs"
+            try:
+                await mystic.edit_text(_["tg_2"].format(elapsed))
+            except Exception:
+                pass
+            _download_ok["ok"] = True
 
         task = asyncio.create_task(down_load())
         config.lyrical[mystic.id] = task
         await task
 
-        # ✅ FIX: check both lyrical presence AND actual download success flag
         verify = config.lyrical.get(mystic.id)
         if not verify:
             return False
         config.lyrical.pop(mystic.id)
 
-        # Final guard: file must exist and be non-empty
         if not _download_ok["ok"] or not os.path.exists(fname) or os.path.getsize(fname) == 0:
             return False
 
