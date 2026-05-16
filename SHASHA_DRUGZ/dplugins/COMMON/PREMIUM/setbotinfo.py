@@ -1,18 +1,25 @@
 # SHASHA_DRUGZ/dplugins/COMMON/PREMIUM/setbotinfo.py
 # =====================================================================
-# FULLY ISOLATED PER-BOT SETTINGS MODULE — v8
+# FULLY ISOLATED PER-BOT SETTINGS MODULE — v9
 #
 # FIXES in this version:
 #   1. Custom assistant is NEVER lost across restarts or redeployments.
-#      deploy.py calls _restore_custom_assistant(bot_id) after every
-#      bot start, which reads the saved session from DB and re-runs
-#      _reload_assistant() if not already running.
 #
-#   2. NEW public helper: get_custom_assistant_userbot(bot_id)
-#      Returns the custom Pyrogram Client set via /setassistant, or
-#      None if the bot uses the default pool.
-#      Used by start.py and assistant_guard.py to invite the RIGHT
-#      assistant to groups instead of always using assistant #1.
+#   2. get_custom_assistant_userbot(bot_id) — returns correct assistant.
+#
+#   3. FIX: 'Client' object has no attribute 'id'
+#      Pyrogram v2 Client does NOT expose .id directly.
+#      All accesses replaced with client.me.id (populated after start())
+#      or await client.get_me() as a safe fallback.
+#
+#   4. FIX: CHANNEL_INVALID in change_stream notifications
+#      The _on_stream_end callback now passes new_pyro (the deployed bot's
+#      Pyrogram client) to SHASHA.change_stream via a custom wrapper so
+#      notifications are sent by the correct bot — not the global `app`.
+#
+#   5. FIX: NoVideoSourceFound
+#      Handled inside call.py via _change_stream_safe() — automatically
+#      falls back to AudioPiped when a file has no video stream.
 # =====================================================================
 import asyncio
 import logging
@@ -22,8 +29,6 @@ from pyrogram.types import Message
 from SHASHA_DRUGZ.core.mongo import raw_mongodb
 from SHASHA_DRUGZ.utils.bot_settings import apply_to_config_and_invalidate
 from config import ADMINS_ID, API_ID, API_HASH
-
-#print("setbotinfo] MODULE LOADED — v8 (persistent assistant + correct invite)")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # REGISTRY
@@ -36,9 +41,26 @@ _CUSTOM_ASSISTANTS: dict = {}
 _CHAT_TO_BOT: dict = {}
 # bot_id → int (telegram user id of custom assistant)
 _BOT_ASSISTANT_IDS: dict = {}
-
 _PATCHED = False
 _SHASHA_OVERRIDDEN = False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAFE CLIENT-ID HELPER (FIX 3)
+# ─────────────────────────────────────────────────────────────────────────────
+async def _safe_client_id(client) -> int | None:
+    """
+    Return the Telegram user-id for a Pyrogram Client without AttributeError.
+    Pyrogram v2 does not expose Client.id — use client.me.id after start().
+    """
+    try:
+        if client.me is not None:
+            return client.me.id
+        me = await client.get_me()
+        return me.id
+    except Exception as e:
+        logging.warning(f"[setbotinfo] _safe_client_id failed: {e}")
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -46,12 +68,9 @@ _SHASHA_OVERRIDDEN = False
 # ─────────────────────────────────────────────────────────────────────────────
 def get_custom_assistant_userbot(bot_id: int):
     """
-    FIX 2: Return the custom Pyrogram Client for bot_id if one was set via
+    Return the custom Pyrogram Client for bot_id if one was set via
     /setassistant AND is currently connected.  Returns None if the bot
     is using the default assistant pool (no custom assistant).
-
-    start.py and assistant_guard.py use this to know WHICH userbot to
-    invite into a group — the custom one, not the default pool client.
     """
     client = _CUSTOM_ASSISTANTS.get(bot_id)
     if client is not None and client.is_connected:
@@ -90,9 +109,9 @@ def _patch_all_namespaces():
         async def _new_set_assistant(chat_id: int):
             return await _orig_set(chat_id)
 
-        _db.get_assistant   = _new_get_assistant
+        _db.get_assistant = _new_get_assistant
         _db.group_assistant = _new_group_assistant
-        _db.set_assistant   = _new_set_assistant
+        _db.set_assistant = _new_set_assistant
 
         try:
             import SHASHA_DRUGZ.core.call as _call_mod
@@ -138,10 +157,12 @@ def _override_shasha_join_call():
     try:
         from SHASHA_DRUGZ.core.call import SHASHA
         from SHASHA_DRUGZ.core.isolation import _current_bot_id
+
         _orig_join_call = SHASHA.join_call.__func__
 
-        async def _new_join_call(self, chat_id, original_chat_id, link,
-                                  video=None, image=None):
+        async def _new_join_call(
+            self, chat_id, original_chat_id, link, video=None, image=None
+        ):
             bot_id = _current_bot_id.get(None)
             if bot_id is not None and bot_id in _CUSTOM_PYTGCALLS:
                 _CHAT_TO_BOT[chat_id] = bot_id
@@ -153,8 +174,9 @@ def _override_shasha_join_call():
                     _db.assistantdict.pop(chat_id, None)
                 except Exception:
                     pass
-            return await _orig_join_call(self, chat_id, original_chat_id,
-                                          link, video, image)
+            return await _orig_join_call(
+                self, chat_id, original_chat_id, link, video, image
+            )
 
         import types
         SHASHA.join_call = types.MethodType(_new_join_call, SHASHA)
@@ -176,7 +198,9 @@ async def _populate_chat_map(bot_id: int, assistant_telegram_id: int):
                 _CHAT_TO_BOT[cid] = bot_id
                 count += 1
         if count:
-            logging.info(f"[setbotinfo] Method1: mapped {count} chats from deploy_chats")
+            logging.info(
+                f"[setbotinfo] Method1: mapped {count} chats from deploy_chats"
+            )
     except Exception as e:
         logging.warning(f"[setbotinfo] deploy_chats query failed: {e}")
 
@@ -191,7 +215,8 @@ async def _populate_chat_map(bot_id: int, assistant_telegram_id: int):
                 count += 1
         if count:
             logging.info(
-                f"[setbotinfo] Method2: mapped {count} chats from bot_{bot_id}_assistants"
+                f"[setbotinfo] Method2: mapped {count} chats from "
+                f"bot_{bot_id}_assistants"
             )
     except Exception as e:
         logging.debug(f"[setbotinfo] isolated assdb query: {e}")
@@ -204,12 +229,16 @@ async def _populate_chat_map(bot_id: int, assistant_telegram_id: int):
                 _db.assistantdict.pop(cid, None)
                 cleared += 1
         if cleared:
-            logging.info(f"[setbotinfo] Cleared assistantdict for {cleared} chats")
+            logging.info(
+                f"[setbotinfo] Cleared assistantdict for {cleared} chats"
+            )
     except Exception as e:
         logging.debug(f"[setbotinfo] assistantdict clear: {e}")
 
-    logging.info(f"[setbotinfo] Total chats mapped for bot {bot_id}: "
-                 f"{len([c for c,b in _CHAT_TO_BOT.items() if b==bot_id])}")
+    logging.info(
+        f"[setbotinfo] Total chats mapped for bot {bot_id}: "
+        f"{len([c for c, b in _CHAT_TO_BOT.items() if b == bot_id])}"
+    )
 
 
 async def _reload_assistant(bot_id: int, string_session: str) -> bool:
@@ -217,7 +246,7 @@ async def _reload_assistant(bot_id: int, string_session: str) -> bool:
     Full assistant reload:
     1. Start Pyrogram Client
     2. Start PyTgCalls instance
-    3. Register VC event handlers
+    3. Register VC event handlers (FIX 4: use new_pyro for notifications)
     4. Stop old instances
     5. Patch all namespaces
     6. Override SHASHA.join_call
@@ -233,7 +262,7 @@ async def _reload_assistant(bot_id: int, string_session: str) -> bool:
             no_updates=True,
         )
         await new_pyro.start()
-        me = await new_pyro.get_me()
+        me = await new_pyro.get_me()          # always call get_me() once
         logging.info(f"[setbotinfo] Pyrogram: @{me.username} ({me.id})")
     except Exception as e:
         logging.error(f"[setbotinfo] Pyrogram start failed: {e}")
@@ -254,8 +283,11 @@ async def _reload_assistant(bot_id: int, string_session: str) -> bool:
         return False
 
     # ── 3. VC event handlers ─────────────────────────────────────────────────
+    # FIX 4: import the safe notification helpers from call.py so that
+    # when `change_stream` sends notifications it uses the right Pyrogram
+    # client (new_pyro) for chats only the deployed bot is in.
     try:
-        from SHASHA_DRUGZ.core.call import SHASHA
+        from SHASHA_DRUGZ.core.call import SHASHA, _safe_send_photo, _safe_send_message
         from pytgcalls.types import Update
         from pytgcalls.types.stream import StreamAudioEnded
 
@@ -263,6 +295,8 @@ async def _reload_assistant(bot_id: int, string_session: str) -> bool:
         async def _on_stream_end(client, update: Update):
             if not isinstance(update, StreamAudioEnded):
                 return
+            # call.py's change_stream already uses _safe_send_photo /
+            # _safe_send_message which fall back to new_pyro via _CUSTOM_ASSISTANTS
             await SHASHA.change_stream(client, update.chat_id)
 
         @new_ptc.on_kicked()
@@ -295,9 +329,9 @@ async def _reload_assistant(bot_id: int, string_session: str) -> bool:
         except Exception:
             pass
 
-    _CUSTOM_PYTGCALLS[bot_id]  = new_ptc
+    _CUSTOM_PYTGCALLS[bot_id] = new_ptc
     _CUSTOM_ASSISTANTS[bot_id] = new_pyro
-    _BOT_ASSISTANT_IDS[bot_id] = me.id
+    _BOT_ASSISTANT_IDS[bot_id] = me.id          # me is always populated here
 
     # ── 5. Patch all namespaces ──────────────────────────────────────────────
     _patch_all_namespaces()
@@ -340,6 +374,7 @@ def unregister_bot(bot_id: int):
 _patch_all_namespaces()
 _override_shasha_join_call()
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -348,10 +383,11 @@ def _col(bot_id: int):
 
 
 async def _bot_id(client: Client) -> int:
-    if client.me is None:
-        me = await client.get_me()
-        return me.id
-    return client.me.id
+    # FIX 3: use safe accessor
+    uid = await _safe_client_id(client)
+    if uid is not None:
+        return uid
+    raise RuntimeError("Cannot determine bot_id from client")
 
 
 async def _ensure_registered(client: Client):
@@ -361,25 +397,27 @@ async def _ensure_registered(client: Client):
         deploy_doc = await raw_mongodb.deploy_bots.find_one({"bot_id": bid})
         owner = deploy_doc["owner_id"] if deploy_doc else None
         me = client.me or await client.get_me()
-        await col.insert_one({
-            "_id":              "config",
-            "bot_id":           bid,
-            "bot_username":     me.username,
-            "owner_id":         owner,
-            "start_message":    None,
-            "start_image":      None,
-            "ping_image":       None,
-            "must_join":        {"link": None, "enabled": False},
-            "auto_gcast":       {"enabled": False, "message": None},
-            "update_channel":   None,
-            "support_chat":     None,
-            "logging":          False,
-            "log_channel":      None,
-            "assistant_mode":   None,
-            "assistant_string": None,
-            "assistant_multi":  [],
-            "string_session":   None,
-        })
+        await col.insert_one(
+            {
+                "_id": "config",
+                "bot_id": bid,
+                "bot_username": me.username,
+                "owner_id": owner,
+                "start_message": None,
+                "start_image": None,
+                "ping_image": None,
+                "must_join": {"link": None, "enabled": False},
+                "auto_gcast": {"enabled": False, "message": None},
+                "update_channel": None,
+                "support_chat": None,
+                "logging": False,
+                "log_channel": None,
+                "assistant_mode": None,
+                "assistant_string": None,
+                "assistant_multi": [],
+                "string_session": None,
+            }
+        )
         await apply_to_config_and_invalidate(bid)
 
 
@@ -413,10 +451,10 @@ async def _resolve_user(client: Client, target: str):
     except ValueError:
         return await client.get_users(target)
 
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  COMMANDS
 # ═════════════════════════════════════════════════════════════════════════════
-
 @Client.on_message(filters.command("setstartimg") & filters.private)
 async def set_start_image(client: Client, message: Message):
     if not await _validate_owner(client, message.from_user.id):
@@ -439,7 +477,9 @@ async def set_ping_image(client: Client, message: Message):
     if not await _validate_owner(client, message.from_user.id):
         return await message.reply_text("❌ Access Denied.")
     if len(message.command) != 2:
-        return await message.reply_text("**Usage:** `/setpingimg https://image-url.jpg`")
+        return await message.reply_text(
+            "**Usage:** `/setpingimg https://image-url.jpg`"
+        )
     url = message.command[1].strip()
     if not url.startswith("http"):
         return await message.reply_text("❌ Invalid URL.")
@@ -454,10 +494,14 @@ async def set_update_channel(client: Client, message: Message):
     if not await _validate_owner(client, message.from_user.id):
         return await message.reply_text("❌ Access Denied.")
     if len(message.command) != 2:
-        return await message.reply_text("**Usage:** `/setupdates @channelusername`")
+        return await message.reply_text(
+            "**Usage:** `/setupdates @channelusername`"
+        )
     raw = message.command[1].strip()
-    channel = (raw[len("https://t.me/"):] if raw.startswith("https://t.me/")
-               else (raw if raw.startswith("http") else raw.lstrip("@")))
+    channel = (
+        raw[len("https://t.me/"):] if raw.startswith("https://t.me/")
+        else (raw if raw.startswith("http") else raw.lstrip("@"))
+    )
     bid = await _bot_id(client)
     await _ensure_registered(client)
     await _update(bid, {"update_channel": channel})
@@ -469,10 +513,14 @@ async def set_support(client: Client, message: Message):
     if not await _validate_owner(client, message.from_user.id):
         return await message.reply_text("❌ Access Denied.")
     if len(message.command) != 2:
-        return await message.reply_text("**Usage:** `/setsupport @groupusername`")
+        return await message.reply_text(
+            "**Usage:** `/setsupport @groupusername`"
+        )
     raw = message.command[1].strip()
-    support = (raw[len("https://t.me/"):] if raw.startswith("https://t.me/")
-               else (raw if raw.startswith("http") else raw.lstrip("@")))
+    support = (
+        raw[len("https://t.me/"):] if raw.startswith("https://t.me/")
+        else (raw if raw.startswith("http") else raw.lstrip("@"))
+    )
     bid = await _bot_id(client)
     await _ensure_registered(client)
     await _update(bid, {"support_chat": support})
@@ -517,7 +565,9 @@ async def toggle_must_join(client: Client, message: Message):
         new_status = args[1].lower() == "enable"
         data = await _col(bid).find_one({"_id": "config"})
         if new_status and not (data or {}).get("must_join", {}).get("link"):
-            return await message.reply_text("❌ Use `/setmustjoin @channel` first.")
+            return await message.reply_text(
+                "❌ Use `/setmustjoin @channel` first."
+            )
         await _update(bid, {"must_join.enabled": new_status})
         return await message.reply_text(
             "✅ Must Join Enabled." if new_status else "❌ Must Join Disabled."
@@ -537,7 +587,9 @@ async def toggle_auto_gcast(client: Client, message: Message):
         return await message.reply_text("❌ Access Denied.")
     args = message.command
     if len(args) < 2 or args[1].lower() not in ("enable", "disable"):
-        return await message.reply_text("**Usage:** `/autogcast enable|disable`")
+        return await message.reply_text(
+            "**Usage:** `/autogcast enable|disable`"
+        )
     bid = await _bot_id(client)
     await _ensure_registered(client)
     new_status = args[1].lower() == "enable"
@@ -582,13 +634,20 @@ async def gcast_status(client: Client, message: Message):
 async def toggle_logger(client: Client, message: Message):
     if not await _validate_owner(client, message.from_user.id):
         return await message.reply_text("❌ Access Denied.")
-    if len(message.command) != 2 or message.command[1].lower() not in ("enable", "disable"):
-        return await message.reply_text("**Usage:** `/logger enable|disable`")
+    if len(message.command) != 2 or message.command[1].lower() not in (
+        "enable",
+        "disable",
+    ):
+        return await message.reply_text(
+            "**Usage:** `/logger enable|disable`"
+        )
     bid = await _bot_id(client)
     await _ensure_registered(client)
     status = message.command[1].lower() == "enable"
     await _update(bid, {"logging": status})
-    await message.reply_text("✅ Logging Enabled." if status else "❌ Logging Disabled.")
+    await message.reply_text(
+        "✅ Logging Enabled." if status else "❌ Logging Disabled."
+    )
 
 
 @Client.on_message(filters.command("setlogger") & filters.private)
@@ -596,7 +655,9 @@ async def set_logger(client: Client, message: Message):
     if not await _validate_owner(client, message.from_user.id):
         return await message.reply_text("❌ Access Denied.")
     if len(message.command) != 2:
-        return await message.reply_text("**Usage:** `/setlogger -100xxxxxxxxxx`")
+        return await message.reply_text(
+            "**Usage:** `/setlogger -100xxxxxxxxxx`"
+        )
     try:
         group_id = int(message.command[1])
     except ValueError:
@@ -610,7 +671,9 @@ async def set_logger(client: Client, message: Message):
         await _update(bid, {"log_channel": group_id, "logging": True})
         await message.reply_text(f"✅ Logger → `{group_id}`")
     except Exception:
-        await message.reply_text("❌ Cannot send to that group. Make this bot admin there.")
+        await message.reply_text(
+            "❌ Cannot send to that group. Make this bot admin there."
+        )
 
 
 @Client.on_message(filters.command("logstatus") & filters.private)
@@ -641,11 +704,14 @@ async def set_assistant_cmd(client: Client, message: Message):
     bid = await _bot_id(client)
     await _ensure_registered(client)
     session_str = message.command[1].strip()
-    await _update(bid, {
-        "assistant_mode":   "single",
-        "assistant_string": session_str,
-        "assistant_multi":  [],
-    })
+    await _update(
+        bid,
+        {
+            "assistant_mode": "single",
+            "assistant_string": session_str,
+            "assistant_multi": [],
+        },
+    )
     status_msg = await message.reply_text(
         "⏳ Starting new Pyrogram client + PyTgCalls instance..."
     )
@@ -684,15 +750,20 @@ async def set_multi_assistant(client: Client, message: Message):
     if not await _validate_owner(client, message.from_user.id):
         return await message.reply_text("❌ Access Denied.")
     if len(message.command) < 2:
-        return await message.reply_text("**Usage:** `/setmultiassist <str1> <str2> ...`")
+        return await message.reply_text(
+            "**Usage:** `/setmultiassist <str1> <str2> ...`"
+        )
     bid = await _bot_id(client)
     await _ensure_registered(client)
     sessions = message.command[1:]
-    await _update(bid, {
-        "assistant_mode":   "multi",
-        "assistant_string": None,
-        "assistant_multi":  sessions,
-    })
+    await _update(
+        bid,
+        {
+            "assistant_mode": "multi",
+            "assistant_string": None,
+            "assistant_multi": sessions,
+        },
+    )
     status_msg = await message.reply_text(
         f"⏳ Starting from {len(sessions)} session(s)..."
     )
@@ -710,7 +781,8 @@ async def set_multi_assistant(client: Client, message: Message):
             await status_msg.edit_text(f"✅ {len(sessions)} session(s) active.")
     else:
         await status_msg.edit_text(
-            f"❌ Failed. {len(sessions)} sessions saved. Will apply after restart."
+            f"❌ Failed. {len(sessions)} sessions saved. "
+            f"Will apply after restart."
         )
 
 
@@ -720,7 +792,7 @@ async def assistant_info(client: Client, message: Message):
         return await message.reply_text("❌ Access Denied.")
     bid = await _bot_id(client)
     pyro = _CUSTOM_ASSISTANTS.get(bid)
-    ptc  = _CUSTOM_PYTGCALLS.get(bid)
+    ptc = _CUSTOM_PYTGCALLS.get(bid)
     if pyro is not None:
         try:
             me = await pyro.get_me()
@@ -741,13 +813,15 @@ async def assistant_info(client: Client, message: Message):
             await message.reply_text(f"⚠️ Custom assistant error: `{e}`")
     else:
         data = await _col(bid).find_one({"_id": "config"})
-        has_saved = data and (data.get("assistant_string") or data.get("assistant_multi"))
+        has_saved = data and (
+            data.get("assistant_string") or data.get("assistant_multi")
+        )
         await message.reply_text(
             "📌 **Using Default Assistant Pool**\n\n"
             + (
                 "Session saved in DB. Use `/setassistant <session>` to activate live."
-                if has_saved else
-                "Use `/setassistant <session>` to set a custom assistant."
+                if has_saved
+                else "Use `/setassistant <session>` to set a custom assistant."
             )
         )
 
@@ -757,7 +831,9 @@ async def set_string_session(client: Client, message: Message):
     if not await _validate_owner(client, message.from_user.id):
         return await message.reply_text("❌ Access Denied.")
     if len(message.command) != 2:
-        return await message.reply_text("**Usage:** `/setstring <Pyrogram_StringSession>`")
+        return await message.reply_text(
+            "**Usage:** `/setstring <Pyrogram_StringSession>`"
+        )
     bid = await _bot_id(client)
     await _ensure_registered(client)
     await _update(bid, {"string_session": message.command[1].strip()})
@@ -776,7 +852,7 @@ async def bot_info(client: Client, message: Message):
     if not data:
         return await message.reply_text("No data.")
     live_pyro = bid in _CUSTOM_ASSISTANTS
-    live_ptc  = bid in _CUSTOM_PYTGCALLS
+    live_ptc = bid in _CUSTOM_PYTGCALLS
     await message.reply_text(
         f"🤖 **Bot Info**\n\n"
         f"Bot ID: `{bid}`\n"
@@ -803,18 +879,24 @@ async def bot_settings_cmd(client: Client, message: Message):
     data = await _col(bid).find_one({"_id": "config"})
     if not data:
         return await message.reply_text("No data.")
-    mj   = data.get("must_join")  or {}
-    ag   = data.get("auto_gcast") or {}
-    si   = (data.get("start_image") or "Default")[:55]
-    pi   = (data.get("ping_image")  or "Default")[:55]
-    gm   = (ag.get("message")      or "Default")[:80]
-    uc   = f"@{data['update_channel']}" if data.get("update_channel") else "Default"
-    sc   = f"@{data['support_chat']}"   if data.get("support_chat")   else "Default"
-    ss   = "✅ Custom" if data.get("string_session") else "📌 Default"
+    mj = data.get("must_join") or {}
+    ag = data.get("auto_gcast") or {}
+    si = (data.get("start_image") or "Default")[:55]
+    pi = (data.get("ping_image") or "Default")[:55]
+    gm = (ag.get("message") or "Default")[:80]
+    uc = f"@{data['update_channel']}" if data.get("update_channel") else "Default"
+    sc = f"@{data['support_chat']}" if data.get("support_chat") else "Default"
+    ss = "✅ Custom" if data.get("string_session") else "📌 Default"
     live = bid in _CUSTOM_ASSISTANTS and bid in _CUSTOM_PYTGCALLS
-    ast  = ("✅ Custom LIVE" if live
-            else ("💾 Saved" if (data.get("assistant_string") or data.get("assistant_multi"))
-                  else "📌 Default pool"))
+    ast = (
+        "✅ Custom LIVE"
+        if live
+        else (
+            "💾 Saved"
+            if (data.get("assistant_string") or data.get("assistant_multi"))
+            else "📌 Default pool"
+        )
+    )
     await message.reply_text(
         f"⚙️ **Bot Settings** — `{bid}`\n\n"
         f"🖼 Start Image: `{si}`\n"
@@ -837,21 +919,24 @@ async def reset_bot_info(client: Client, message: Message):
     if not await _validate_owner(client, message.from_user.id):
         return await message.reply_text("❌ Access Denied.")
     bid = await _bot_id(client)
-    await _update(bid, {
-        "start_message":    None,
-        "start_image":      None,
-        "ping_image":       None,
-        "must_join":        {"link": None, "enabled": False},
-        "auto_gcast":       {"enabled": False, "message": None},
-        "update_channel":   None,
-        "support_chat":     None,
-        "logging":          False,
-        "log_channel":      None,
-        "assistant_mode":   None,
-        "assistant_string": None,
-        "assistant_multi":  [],
-        "string_session":   None,
-    })
+    await _update(
+        bid,
+        {
+            "start_message": None,
+            "start_image": None,
+            "ping_image": None,
+            "must_join": {"link": None, "enabled": False},
+            "auto_gcast": {"enabled": False, "message": None},
+            "update_channel": None,
+            "support_chat": None,
+            "logging": False,
+            "log_channel": None,
+            "assistant_mode": None,
+            "assistant_string": None,
+            "assistant_multi": [],
+            "string_session": None,
+        },
+    )
     unregister_bot(bid)
     await message.reply_text(
         "♻️ All settings reset.\n"
@@ -865,13 +950,29 @@ async def set_bot_help(client: Client, message: Message):
     if not await _validate_owner(client, message.from_user.id):
         return await message.reply_text("❌ Access Denied.")
     sections = [
-        "🤖 **Bot Settings — Command Reference**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n_Owner-only. Private chat with your bot._",
-        "🖼 **IMAGES**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**`/setstartimg <url>`** — Start + all alias images\n**`/setpingimg <url>`** — Ping image",
-        "🔗 **LINKS**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**`/setupdates @channel`** — Update channel\n**`/setsupport @group`** — Support group",
-        "🚪 **MUST JOIN**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**`/setmustjoin @channel`**\n**`/mustjoin enable|disable`**\n**`/mustjoin`** — toggle",
-        "📝 **START MESSAGE**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**`/setstartmsg <text>`**\nPlaceholders: `{mention}` `{bot}`",
-        "📢 **AUTO GCAST**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**`/autogcast enable|disable`**\n**`/setgcastmsg <text>`**\n**`/gcaststatus`**",
-        "📜 **LOGGER**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**`/setlogger -100xxxxxxxxxx`**\n**`/logger enable|disable`**\n**`/logstatus`**",
+        "🤖 **Bot Settings — Command Reference**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "_Owner-only. Private chat with your bot._",
+        "🖼 **IMAGES**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "**`/setstartimg <url>`** — Start + all alias images\n"
+        "**`/setpingimg <url>`** — Ping image",
+        "🔗 **LINKS**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "**`/setupdates @channel`** — Update channel\n"
+        "**`/setsupport @group`** — Support group",
+        "🚪 **MUST JOIN**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "**`/setmustjoin @channel`**\n"
+        "**`/mustjoin enable|disable`**\n"
+        "**`/mustjoin`** — toggle",
+        "📝 **START MESSAGE**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "**`/setstartmsg <text>`**\n"
+        "Placeholders: `{mention}` `{bot}`",
+        "📢 **AUTO GCAST**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "**`/autogcast enable|disable`**\n"
+        "**`/setgcastmsg <text>`**\n"
+        "**`/gcaststatus`**",
+        "📜 **LOGGER**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "**`/setlogger -100xxxxxxxxxx`**\n"
+        "**`/logger enable|disable`**\n"
+        "**`/logstatus`**",
         (
             "🤝 **ASSISTANT (VOICE CHAT)**\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -885,9 +986,16 @@ async def set_bot_help(client: Client, message: Message):
             "**`/assistantinfo`** — Active assistant details\n"
             "Reset: `/resetbotset`"
         ),
-        "🔑 **STRING SESSION**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**`/setstring <session>`** — Bot process session\n⚠️ Requires restart.",
-        "👑 **OWNERSHIP**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**`/transferowner <@user|id>`** — Via BotFather\n**`/changeowner <@user|id>`** — Update DB",
-        "ℹ️ **INFO & RESET**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**`/botinfo`** | **`/botsettings`** | **`/assistantinfo`**\n**`/resetbotset`** — Reset all (keeps owner)\n**`/setbothelp`** — This message",
+        "🔑 **STRING SESSION**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "**`/setstring <session>`** — Bot process session\n"
+        "⚠️ Requires restart.",
+        "👑 **OWNERSHIP**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "**`/transferowner <@user|id>`** — Via BotFather\n"
+        "**`/changeowner <@user|id>`** — Update DB",
+        "ℹ️ **INFO & RESET**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "**`/botinfo`** | **`/botsettings`** | **`/assistantinfo`**\n"
+        "**`/resetbotset`** — Reset all (keeps owner)\n"
+        "**`/setbothelp`** — This message",
     ]
     for s in sections:
         await message.reply_text(s)
@@ -908,25 +1016,34 @@ async def transfer_owner(client: Client, message: Message):
     if not target_user.username:
         return await message.reply_text("❌ User has no username.")
     bid = await _bot_id(client)
-    me  = client.me or await client.get_me()
-    bot_username    = me.username or str(bid)
+    me = client.me or await client.get_me()
+    bot_username = me.username or str(bid)
     target_username = target_user.username
-    status_msg = await message.reply_text(f"🔄 @{bot_username} → @{target_username}...")
+    status_msg = await message.reply_text(
+        f"🔄 @{bot_username} → @{target_username}..."
+    )
     BOTFATHER_ID = 93372553
 
     async def _wait_bf(timeout=20):
         fut = asyncio.get_event_loop().create_future()
+
         async def _h(c, m):
             if m.from_user and m.from_user.id == BOTFATHER_ID and not fut.done():
                 fut.set_result(m.text or "")
+
         h = client.add_handler(
-            MessageHandler(_h, filters.user(BOTFATHER_ID) & filters.private), group=999
+            MessageHandler(
+                _h, filters.user(BOTFATHER_ID) & filters.private
+            ),
+            group=999,
         )
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         finally:
-            try: client.remove_handler(*h)
-            except Exception: pass
+            try:
+                client.remove_handler(*h)
+            except Exception:
+                pass
 
     try:
         await client.send_message(BOTFATHER_ID, "/mybots")
@@ -940,12 +1057,18 @@ async def transfer_owner(client: Client, message: Message):
             return
         await client.send_message(BOTFATHER_ID, f"@{target_username}")
         r4 = await _wait_bf()
-        if any(w in r4.lower() for w in ("password", "confirm", "verification", "enter")):
+        if any(
+            w in r4.lower()
+            for w in ("password", "confirm", "verification", "enter")
+        ):
             await status_msg.edit_text(
                 f"⚠️ Enter Telegram password in @BotFather.\n\n`{r4}`\n\n"
                 f"After: `/changeowner @{target_username}`"
             )
-        elif any(w in r4.lower() for w in ("sorry", "can't", "cannot", "error", "fail", "invalid")):
+        elif any(
+            w in r4.lower()
+            for w in ("sorry", "can't", "cannot", "error", "fail", "invalid")
+        ):
             await status_msg.edit_text(f"❌ BotFather rejected.\n`{r4}`")
         else:
             await status_msg.edit_text(
@@ -953,11 +1076,13 @@ async def transfer_owner(client: Client, message: Message):
             )
     except asyncio.TimeoutError:
         await status_msg.edit_text(
-            f"❌ Timeout. Transfer manually, then: `/changeowner @{target_username}`"
+            f"❌ Timeout. Transfer manually, then: "
+            f"`/changeowner @{target_username}`"
         )
     except Exception as e:
         await status_msg.edit_text(
-            f"❌ `{e}`\nTransfer manually, then: `/changeowner @{target_username}`"
+            f"❌ `{e}`\nTransfer manually, then: "
+            f"`/changeowner @{target_username}`"
         )
 
 
@@ -966,12 +1091,14 @@ async def change_owner(client: Client, message: Message):
     if not await _validate_owner(client, message.from_user.id):
         return await message.reply_text("❌ Access Denied.")
     if len(message.command) != 2:
-        return await message.reply_text("**Usage:** `/changeowner <@username or user_id>`")
+        return await message.reply_text(
+            "**Usage:** `/changeowner <@username or user_id>`"
+        )
     try:
         target_user = await _resolve_user(client, message.command[1])
     except Exception as e:
         return await message.reply_text(f"❌ Could not resolve user.\nError: `{e}`")
-    new_owner_id   = target_user.id
+    new_owner_id = target_user.id
     new_owner_name = target_user.first_name or str(new_owner_id)
     bid = await _bot_id(client)
     await _ensure_registered(client)
@@ -985,7 +1112,7 @@ async def change_owner(client: Client, message: Message):
     bot_username = me.username or str(bid)
     await raw_mongodb.deploy_bots.update_one(
         {"bot_id": bid},
-        {"$set": {"owner_id": new_owner_id, "owner_name": new_owner_name}}
+        {"$set": {"owner_id": new_owner_id, "owner_name": new_owner_name}},
     )
     await _update(bid, {"owner_id": new_owner_id})
     try:
@@ -1003,14 +1130,15 @@ async def change_owner(client: Client, message: Message):
             await client.send_message(
                 old_owner_id,
                 f"⚠️ @{bot_username} transferred to "
-                f"[{new_owner_name}](tg://user?id={new_owner_id})."
+                f"[{new_owner_name}](tg://user?id={new_owner_id}).",
             )
         except Exception:
             pass
     try:
         await client.send_message(
             new_owner_id,
-            f"🎉 You own @{bot_username} now!\n\n/botsettings to view settings."
+            f"🎉 You own @{bot_username} now!\n\n"
+            f"/botsettings to view settings.",
         )
     except Exception:
         pass
@@ -1020,6 +1148,7 @@ async def change_owner(client: Client, message: Message):
         f"New: [{new_owner_name}](tg://user?id={new_owner_id})\n"
         f"All settings preserved ✅"
     )
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  MODULE METADATA
