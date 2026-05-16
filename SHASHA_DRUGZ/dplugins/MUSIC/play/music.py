@@ -76,6 +76,58 @@ from config import BANNED_USERS, adminlist, lyrical
 # ----------------------------------- GLOBALS -----------------------------------
 checker = []
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER: refresh a Telegram file reference before download
+# ─────────────────────────────────────────────────────────────────────────────
+async def _refresh_file_ref(chat_id: int, message_id: int, is_audio: bool):
+    """
+    Re-fetch the message from Telegram to get a fresh file_reference.
+    Returns the refreshed audio/voice or video/document object, or None on failure.
+    """
+    try:
+        fresh = await app.get_messages(chat_id, message_id)
+        if is_audio:
+            return fresh.audio or fresh.voice
+        else:
+            return fresh.video or fresh.document
+    except Exception as e:
+        print(f"[_refresh_file_ref] Failed to refresh reference: {e}")
+        return None
+
+
+async def _download_with_retry(_, message, mystic, file_path, media_obj,
+                                chat_id: int, message_id: int, is_audio: bool,
+                                max_retries: int = 2):
+    """
+    Attempt Telegram.download(); on FILE_REFERENCE_EXPIRED re-fetch and retry.
+    Returns True on success, False on failure.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            result = await Telegram.download(_, message, mystic, file_path)
+            if result:
+                return True, media_obj
+        except Exception as e:
+            err_str = str(e)
+            if "FILE_REFERENCE" in err_str and attempt < max_retries:
+                print(f"[_download_with_retry] FILE_REFERENCE_EXPIRED on attempt "
+                      f"{attempt + 1}, refreshing...")
+                refreshed = await _refresh_file_ref(chat_id, message_id, is_audio)
+                if refreshed:
+                    media_obj = refreshed
+                    # Re-compute file_path for the refreshed object
+                    if is_audio:
+                        file_path = await Telegram.get_filepath(audio=refreshed)
+                    else:
+                        file_path = await Telegram.get_filepath(video=refreshed)
+                continue
+            # Non-retryable error or max retries exceeded
+            print(f"[_download_with_retry] Download failed: {e}")
+            return False, media_obj
+    return False, media_obj
+
+
 # =================================== HANDLERS ===================================
 
 # ------------------------------ channelplay command ----------------------------
@@ -637,7 +689,6 @@ async def play_commnd(
     spotify = None
     user_id = message.from_user.id
     user_name = message.from_user.first_name
-
     audio_telegram = (
         (message.reply_to_message.audio or message.reply_to_message.voice)
         if message.reply_to_message
@@ -659,47 +710,52 @@ async def play_commnd(
                 _["play_6"].format(config.DURATION_LIMIT_MIN, app.mention)
             )
 
-        # ✅ FIX: Re-fetch the replied message to get a fresh file reference,
-        #         preventing FileReferenceExpired during download.
-        try:
-            fresh_reply = await app.get_messages(
-                message.chat.id, message.reply_to_message.id
-            )
-            audio_telegram = fresh_reply.audio or fresh_reply.voice
-        except Exception:
-            pass  # fall back to original reference; download may still succeed
+        # ✅ FIX: Always refresh the file reference before download to prevent
+        #         FILE_REFERENCE_EXPIRED errors (Telegram references expire quickly).
+        refreshed = await _refresh_file_ref(
+            message.chat.id, message.reply_to_message.id, is_audio=True
+        )
+        if refreshed:
+            audio_telegram = refreshed
 
         file_path = await Telegram.get_filepath(audio=audio_telegram)
-        if await Telegram.download(_, message, mystic, file_path):
-            message_link = await Telegram.get_link(message)
-            file_name = await Telegram.get_filename(audio_telegram, audio=True)
-            dur = await Telegram.get_duration(audio_telegram, file_path)
-            details = {
-                "title": file_name,
-                "link": message_link,
-                "path": file_path,
-                "dur": dur,
-            }
-            try:
-                await stream(
-                    _,
-                    mystic,
-                    user_id,
-                    details,
-                    chat_id,
-                    user_name,
-                    message.chat.id,
-                    client,
-                    streamtype="telegram",
-                    forceplay=fplay,
-                )
-            except Exception as e:
-                ex_type = type(e).__name__
-                err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
-                print(e)
-                return await mystic.edit_text(e)
-            return await mystic.delete()
-        return
+
+        # ✅ FIX: Use retry-capable download wrapper
+        success, audio_telegram = await _download_with_retry(
+            _, message, mystic, file_path, audio_telegram,
+            message.chat.id, message.reply_to_message.id, is_audio=True
+        )
+        if not success:
+            return
+
+        message_link = await Telegram.get_link(message)
+        file_name = await Telegram.get_filename(audio_telegram, audio=True)
+        dur = await Telegram.get_duration(audio_telegram, file_path)
+        details = {
+            "title": file_name,
+            "link": message_link,
+            "path": file_path,
+            "dur": dur,
+        }
+        try:
+            await stream(
+                _,
+                mystic,
+                user_id,
+                details,
+                chat_id,
+                user_name,
+                message.chat.id,
+                client,
+                streamtype="telegram",
+                forceplay=fplay,
+            )
+        except Exception as e:
+            ex_type = type(e).__name__
+            err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
+            print(e)
+            return await mystic.edit_text(err)
+        return await mystic.delete()
 
     # ── TELEGRAM VIDEO / DOCUMENT ─────────────────────────────────────────────
     elif video_telegram:
@@ -717,48 +773,53 @@ async def play_commnd(
         if video_telegram.file_size > config.TG_VIDEO_FILESIZE_LIMIT:
             return await mystic.edit_text(_["play_8"])
 
-        # ✅ FIX: Re-fetch the replied message to get a fresh file reference,
-        #         preventing FileReferenceExpired during download.
-        try:
-            fresh_reply = await app.get_messages(
-                message.chat.id, message.reply_to_message.id
-            )
-            video_telegram = fresh_reply.video or fresh_reply.document
-        except Exception:
-            pass  # fall back to original reference
+        # ✅ FIX: Always refresh the file reference before download to prevent
+        #         FILE_REFERENCE_EXPIRED errors.
+        refreshed = await _refresh_file_ref(
+            message.chat.id, message.reply_to_message.id, is_audio=False
+        )
+        if refreshed:
+            video_telegram = refreshed
 
         file_path = await Telegram.get_filepath(video=video_telegram)
-        if await Telegram.download(_, message, mystic, file_path):
-            message_link = await Telegram.get_link(message)
-            file_name = await Telegram.get_filename(video_telegram)
-            dur = await Telegram.get_duration(video_telegram, file_path)
-            details = {
-                "title": file_name,
-                "link": message_link,
-                "path": file_path,
-                "dur": dur,
-            }
-            try:
-                await stream(
-                    _,
-                    mystic,
-                    user_id,
-                    details,
-                    chat_id,
-                    user_name,
-                    message.chat.id,
-                    client,
-                    video=True,
-                    streamtype="telegram",
-                    forceplay=fplay,
-                )
-            except Exception as e:
-                ex_type = type(e).__name__
-                err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
-                print(e)
-                return await mystic.edit_text(e)
-            return await mystic.delete()
-        return
+
+        # ✅ FIX: Use retry-capable download wrapper
+        success, video_telegram = await _download_with_retry(
+            _, message, mystic, file_path, video_telegram,
+            message.chat.id, message.reply_to_message.id, is_audio=False
+        )
+        if not success:
+            return
+
+        message_link = await Telegram.get_link(message)
+        file_name = await Telegram.get_filename(video_telegram)
+        dur = await Telegram.get_duration(video_telegram, file_path)
+        details = {
+            "title": file_name,
+            "link": message_link,
+            "path": file_path,
+            "dur": dur,
+        }
+        try:
+            await stream(
+                _,
+                mystic,
+                user_id,
+                details,
+                chat_id,
+                user_name,
+                message.chat.id,
+                client,
+                video=True,
+                streamtype="telegram",
+                forceplay=fplay,
+            )
+        except Exception as e:
+            ex_type = type(e).__name__
+            err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
+            print(e)
+            return await mystic.edit_text(err)
+        return await mystic.delete()
 
     # ── URL HANDLING ──────────────────────────────────────────────────────────
     elif url:
@@ -912,7 +973,7 @@ async def play_commnd(
                 ex_type = type(e).__name__
                 err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
                 print(e)
-                return await mystic.edit_text(e)
+                return await mystic.edit_text(err)
             return await mystic.delete()
         elif await Instagram.valid(url):
             try:
@@ -954,7 +1015,7 @@ async def play_commnd(
                 ex_type = type(e).__name__
                 err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
                 print(e)
-                return await mystic.edit_text(e)
+                return await mystic.edit_text(err)
             return await play_logs(message, streamtype="M3u8 or Index Link")
     else:
         if len(message.command) < 2:
@@ -1013,7 +1074,7 @@ async def play_commnd(
             ex_type = type(e).__name__
             err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
             print(e)
-            return await mystic.edit_text(e)
+            return await mystic.edit_text(err)
         await mystic.delete()
         return await play_logs(message, streamtype=streamtype)
     else:
@@ -1144,7 +1205,7 @@ async def play_music(client, CallbackQuery, _):
         ex_type = type(e).__name__
         err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
         print(e)
-        return await mystic.edit_text(e)
+        return await mystic.edit_text(err)
     return await mystic.delete()
 
 
@@ -1241,7 +1302,7 @@ async def play_playlists_command(client, CallbackQuery, _):
         ex_type = type(e).__name__
         err = e if ex_type == "AssistantErr" else _["general_2"].format(ex_type)
         print(e)
-        return await mystic.edit_text(e)
+        return await mystic.edit_text(err)
     return await mystic.delete()
 
 
@@ -1601,9 +1662,18 @@ async def stream(
         duration_min = result["dur"]
         status       = True if video else None
 
+        # ✅ FIX: Validate file before processing — catch corrupt/empty downloads
+        if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+            raise AssistantErr(_["play_14"])
+
         # ✅ FIX: Re-encode unsupported codecs BEFORE calling join_call.
         #         mtime-based cache validation ensures stale compat files are rebuilt.
         file_path = await ensure_compatible(file_path, video=bool(video))
+
+        # ✅ FIX: If ensure_compatible returned the original and it's still corrupt,
+        #         don't attempt to play — pytgcalls will throw NoAudioSourceFound
+        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+            raise AssistantErr(_["play_14"])
 
         if await is_active_chat(chat_id):
             await put_queue(
@@ -1805,7 +1875,6 @@ __help__ = """
 📢 ᴄʜᴀɴɴᴇʟ ᴘʟᴀʏ
 🔻 /channelplay [channel username/id or linked or disable]
 """
-
 MOD_TYPE = "MUSIC"
 MOD_NAME = "MUSIC-BOT"
 MOD_PRICE = "250"
