@@ -70,7 +70,6 @@ from SHASHA_DRUGZ.utils.exceptions import AssistantErr
 from SHASHA_DRUGZ.utils.pastebin import SHASHABin
 from SHASHA_DRUGZ.utils.stream.queue import put_queue, put_queue_index
 from SHASHA_DRUGZ.utils import seconds_to_min, time_to_seconds
-from SHASHA_DRUGZ.core.call import SHASHA, _safe_send_photo, _safe_send_message
 from youtubesearchpython.__future__ import VideosSearch
 from config import BANNED_USERS, adminlist, lyrical
 
