@@ -12,9 +12,7 @@ from SHASHA_DRUGZ.utils.formatters import (
     get_readable_time,
     seconds_to_min,
 )
-# ─────────────────────────────────────────────
-#  Supported AUDIO file extensions & MIME types
-# ─────────────────────────────────────────────
+
 AUDIO_MIME_MAP = {
     "audio/mpeg":               "mp3",
     "audio/mp3":                "mp3",
@@ -53,9 +51,7 @@ AUDIO_MIME_MAP = {
     "audio/basic":              "au",
     "audio/au":                 "au",
 }
-# ─────────────────────────────────────────────
-#  Supported VIDEO file extensions & MIME types
-# ─────────────────────────────────────────────
+
 VIDEO_MIME_MAP = {
     "video/mp4":                "mp4",
     "video/x-m4v":              "m4v",
@@ -96,9 +92,7 @@ VIDEO_MIME_MAP = {
     "video/dvd":                "vob",
     "application/octet-stream": "mp4",
 }
-# ─────────────────────────────────────────────
-#  Document extension sets (for doc-type media)
-# ─────────────────────────────────────────────
+
 DOCUMENT_AUDIO_EXTS = {
     "mp3", "m4a", "aac", "ogg", "opus", "flac", "wav", "webm",
     "wma", "aiff", "aif", "amr", "awb", "3gp", "3g2", "ape",
@@ -109,18 +103,14 @@ DOCUMENT_VIDEO_EXTS = {
     "mpg", "3gp", "3g2", "ogv", "ts", "mxf", "asf", "divx",
     "rv", "h264", "hevc", "m2ts", "vob", "m4v",
 }
+
+
 class TeleAPI:
     def __init__(self):
         self.chars_limit = 4096
         self.sleep = 5
-    # ── helpers ──────────────────────────────────────────────────────────
+
     def _resolve_ext(self, file, mime_map: dict, fallback: str) -> str:
-        """
-        Try to determine a file extension in this order:
-          1. file_name attribute  (most reliable)
-          2. mime_type attribute  (looked up in our mime_map, then stdlib)
-          3. fallback             (hardcoded safe default)
-        """
         try:
             name = file.file_name
             if name and "." in name:
@@ -140,6 +130,7 @@ class TeleAPI:
         except Exception:
             pass
         return fallback
+
     def is_video_document(self, file) -> bool:
         try:
             name = file.file_name or ""
@@ -158,6 +149,7 @@ class TeleAPI:
         except Exception:
             pass
         return False
+
     def is_audio_document(self, file) -> bool:
         try:
             name = file.file_name or ""
@@ -176,7 +168,7 @@ class TeleAPI:
         except Exception:
             pass
         return False
-    # ── public API ───────────────────────────────────────────────────────
+
     async def send_split_text(self, message, string):
         n = self.chars_limit
         out = [(string[i: i + n]) for i in range(0, len(string), n)]
@@ -186,8 +178,10 @@ class TeleAPI:
                 j += 1
                 await message.reply_text(x, disable_web_page_preview=True)
         return True
+
     async def get_link(self, message):
         return message.link
+
     async def get_filename(self, file, audio: Union[bool, str] = None):
         try:
             file_name = file.file_name
@@ -196,6 +190,7 @@ class TeleAPI:
         except Exception:
             file_name = "ᴛᴇʟᴇɢʀᴀᴍ ᴀᴜᴅɪᴏ" if audio else "ᴛᴇʟᴇɢʀᴀᴍ ᴠɪᴅᴇᴏ"
         return file_name
+
     async def get_duration(self, filex, file_path):
         try:
             dur = seconds_to_min(filex.duration)
@@ -208,17 +203,12 @@ class TeleAPI:
             except Exception:
                 return "Unknown"
         return dur
+
     async def get_filepath(
         self,
         audio: Union[bool, str] = None,
         video: Union[bool, str] = None,
     ):
-        """
-        Returns the local download path for an audio or video file.
-        NOTE: ensure_compatible() in stream.py will re-encode to H.264+AAC
-              if the actual codec inside the file isn't supported by ntgcalls.
-              So we just need to preserve the real extension here.
-        """
         downloads_dir = os.path.realpath("downloads")
         os.makedirs(downloads_dir, exist_ok=True)
         if audio:
@@ -231,25 +221,14 @@ class TeleAPI:
             ext = self._resolve_ext(video, VIDEO_MIME_MAP, "mp4")
             file_name = os.path.join(downloads_dir, f"{video.file_unique_id}.{ext}")
         return file_name
+
     async def download(self, _, message, mystic, fname):
         lower   = [0,  8,  17, 38, 64, 77, 96]
         higher  = [5,  10, 20, 40, 66, 80, 99]
         checker = [5,  10, 20, 40, 66, 80, 99]
         speed_counter = {}
-        # ✅ KEY FIX: Always re-download to guarantee the source file is fresh.
-        #
-        # Previously:  if os.path.exists(fname): return True
-        # Problem:     On second play of the same file_unique_id, the old
-        #              downloaded file still exists on disk.  ensure_compatible()
-        #              sees its _compat cache is newer than the source → returns
-        #              the stale compat file.  But ntgcalls complains because
-        #              the *original* source file (e.g. .mkv) is what was passed
-        #              to join_call() in some code paths, not the compat file.
-        #
-        # Fix:         Delete the source file (and its compat cache) before
-        #              downloading so we always get a fresh copy and a fresh
-        #              compat encode.  The overhead is negligible because
-        #              Telegram caches files server-side.
+
+        # Always re-download to guarantee a fresh, uncorrupted source file.
         if os.path.exists(fname):
             try:
                 os.remove(fname)
@@ -263,6 +242,10 @@ class TeleAPI:
                         os.remove(compat)
                     except Exception:
                         pass
+
+        # ── track whether the download actually succeeded ─────────────────
+        _download_ok = {"ok": False}
+
         async def down_load():
             async def progress(current, total):
                 if current == total:
@@ -271,14 +254,7 @@ class TeleAPI:
                 start_time   = speed_counter.get(message.id)
                 check_time   = current_time - start_time
                 upl = InlineKeyboardMarkup(
-                    [
-                        [
-                            InlineKeyboardButton(
-                                text="ᴄᴀɴᴄᴇʟ",
-                                callback_data="stop_downloading",
-                            )
-                        ]
-                    ]
+                    [[InlineKeyboardButton(text="ᴄᴀɴᴄᴇʟ", callback_data="stop_downloading")]]
                 )
                 percentage    = current * 100 / total
                 percentage    = str(round(percentage, 2))
@@ -312,6 +288,7 @@ class TeleAPI:
                                 checker[counter] = 100
                             except Exception:
                                 pass
+
             speed_counter[message.id] = time.time()
             try:
                 await app.download_media(
@@ -319,6 +296,9 @@ class TeleAPI:
                     file_name=fname,
                     progress=progress,
                 )
+                # ✅ FIX: validate the file is real and non-empty
+                if not os.path.exists(fname) or os.path.getsize(fname) == 0:
+                    raise ValueError("Downloaded file is empty or missing")
                 try:
                     elapsed = get_readable_time(
                         int(time.time()) - int(speed_counter[message.id])
@@ -326,13 +306,33 @@ class TeleAPI:
                 except Exception:
                     elapsed = "0 sᴇᴄᴏɴᴅs"
                 await mystic.edit_text(_["tg_2"].format(elapsed))
-            except Exception:
-                await mystic.edit_text(_["tg_3"])
+                _download_ok["ok"] = True
+            except Exception as e:
+                # ✅ FIX: pop from lyrical so download() returns False on failure
+                config.lyrical.pop(mystic.id, None)
+                # Clean up any partial/corrupt file
+                if os.path.exists(fname):
+                    try:
+                        os.remove(fname)
+                    except Exception:
+                        pass
+                try:
+                    await mystic.edit_text(_["tg_3"])
+                except Exception:
+                    pass
+
         task = asyncio.create_task(down_load())
         config.lyrical[mystic.id] = task
         await task
+
+        # ✅ FIX: check both lyrical presence AND actual download success flag
         verify = config.lyrical.get(mystic.id)
         if not verify:
             return False
         config.lyrical.pop(mystic.id)
+
+        # Final guard: file must exist and be non-empty
+        if not _download_ok["ok"] or not os.path.exists(fname) or os.path.getsize(fname) == 0:
+            return False
+
         return True
