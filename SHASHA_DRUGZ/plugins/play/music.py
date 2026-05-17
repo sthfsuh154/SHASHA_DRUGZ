@@ -86,6 +86,12 @@ ALL_AUDIO_EXTS = {
 }
 ALL_MEDIA_EXTS = ALL_VIDEO_EXTS | ALL_AUDIO_EXTS
 
+# ── Timeout constants ─────────────────────────────────────────────────────────
+# FIX: seek_stream and speedup_stream can hang indefinitely on large files.
+# These timeouts ensure handlers always resolve and the bot stays responsive.
+SEEK_TIMEOUT  = 60   # seconds
+SPEED_TIMEOUT = 60   # seconds
+
 # ── globals ───────────────────────────────────────────────────────────────────
 checker = []
 
@@ -191,11 +197,11 @@ async def resume_com(cli, message: Message, _, chat_id):
         ],
         [
             InlineKeyboardButton(text="ᴘᴀᴜsᴇ", callback_data=f"ADMIN Pause|{chat_id}"),
-        ]
+        ],
     ]
     await message.reply_text(
         _["admin_4"].format(message.from_user.mention),
-        reply_markup=InlineKeyboardMarkup(buttons_resume)
+        reply_markup=InlineKeyboardMarkup(buttons_resume),
     )
 
 
@@ -215,7 +221,7 @@ async def pause_admin(cli, message: Message, _, chat_id):
     ]
     await message.reply_text(
         _["admin_2"].format(message.from_user.mention),
-        reply_markup=InlineKeyboardMarkup(buttons)
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 
@@ -251,8 +257,10 @@ async def del_back_playlist(client, callback_query, _):
     callback_request = callback_data.split(None, 1)[1]
     chat, speed = callback_request.split("|")
     chat_id = int(chat)
+
     if not await is_active_chat(chat_id):
         return await callback_query.answer(_["general_5"], show_alert=True)
+
     is_non_admin = await is_nonadmin_chat(callback_query.message.chat.id)
     if not is_non_admin:
         if callback_query.from_user.id not in SUDOERS:
@@ -262,6 +270,7 @@ async def del_back_playlist(client, callback_query, _):
             else:
                 if callback_query.from_user.id not in admins:
                     return await callback_query.answer(_["admin_14"], show_alert=True)
+
     playing = db.get(chat_id)
     if not playing:
         return await callback_query.answer(_["queue_2"], show_alert=True)
@@ -271,6 +280,7 @@ async def del_back_playlist(client, callback_query, _):
     file_path = playing[0]["file"]
     if "downloads" not in file_path:
         return await callback_query.answer(_["admin_27"], show_alert=True)
+
     checkspeed = playing[0].get("speed")
     if checkspeed:
         if str(checkspeed) == str(speed):
@@ -279,30 +289,50 @@ async def del_back_playlist(client, callback_query, _):
     else:
         if str(speed) == str("1.0"):
             return await callback_query.answer(_["admin_29"], show_alert=True)
+
     if chat_id in checker:
         return await callback_query.answer(_["admin_30"], show_alert=True)
-    else:
-        checker.append(chat_id)
+
+    checker.append(chat_id)
+
     try:
         await callback_query.answer(_["admin_31"])
-    except:
+    except Exception:
         pass
+
     mystic = await app.send_message(
         callback_query.message.chat.id,
         text=_["admin_32"].format(callback_query.from_user.mention),
     )
+
+    # FIX: use try/finally so checker is ALWAYS cleaned up regardless of
+    # whether speedup_stream succeeds, raises, times out, or is cancelled.
+    # The original dual-except approach left chat_id stuck in checker forever
+    # if speedup_stream hung without raising an exception.
     try:
-        await SHASHA.speedup_stream(chat_id, file_path, speed, playing)
-    except:
-        if chat_id in checker:
-            checker.remove(chat_id)
-        return await app.send_message(
+        await asyncio.wait_for(
+            SHASHA.speedup_stream(chat_id, file_path, speed, playing),
+            timeout=SPEED_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        await app.send_message(
+            callback_query.message.chat.id,
+            text="⚠️ Speed change timed out. Please try again.",
+            reply_markup=close_markup(_),
+        )
+        return
+    except Exception:
+        await app.send_message(
             callback_query.message.chat.id,
             text=_["admin_33"],
             reply_markup=close_markup(_),
         )
-    if chat_id in checker:
-        checker.remove(chat_id)
+        return
+    finally:
+        # Guaranteed cleanup — runs on every exit path including cancellation
+        if chat_id in checker:
+            checker.remove(chat_id)
+
     await app.send_message(
         callback_query.message.chat.id,
         text=_["admin_34"].format(speed, callback_query.from_user.mention),
@@ -314,7 +344,7 @@ async def del_back_playlist(client, callback_query, _):
 @app.on_message(
     filters.command(
         ["end", "cend"],
-        prefixes=["end", "/", "!", "%", ",", "", ".", "@", "#"]
+        prefixes=["end", "/", "!", "%", ",", "", ".", "@", "#"],
     )
     & filters.group
     & ~BANNED_USERS
@@ -334,7 +364,7 @@ async def stop_music(cli, message: Message, _, chat_id):
 @app.on_message(
     filters.command(
         ["skip", "cskip", "next", "cnext"],
-        prefixes=["skip", "/", "!", "%", ",", ".", "@", "#"]
+        prefixes=["skip", "/", "!", "%", ",", ".", "@", "#"],
     )
     & filters.group
     & ~BANNED_USERS
@@ -514,7 +544,9 @@ async def skip(cli, message: Message, _, chat_id):
             button = stream_markup2(_, chat_id)
             run = await message.reply_photo(
                 photo=config.TELEGRAM_AUDIO_URL if str(streamtype) == "audio" else config.TELEGRAM_VIDEO_URL,
-                caption=_["stream_1"].format(config.SUPPORT_CHAT, title[:23], check[0]["dur"], user),
+                caption=_["stream_1"].format(
+                    config.SUPPORT_CHAT, title[:23], check[0]["dur"], user
+                ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
             db[chat_id][0]["mystic"] = run
@@ -523,7 +555,9 @@ async def skip(cli, message: Message, _, chat_id):
             button = stream_markup2(_, chat_id)
             run = await message.reply_photo(
                 photo=config.SOUNCLOUD_IMG_URL if str(streamtype) == "audio" else config.TELEGRAM_VIDEO_URL,
-                caption=_["stream_1"].format(config.SUPPORT_CHAT, title[:23], check[0]["dur"], user),
+                caption=_["stream_1"].format(
+                    config.SUPPORT_CHAT, title[:23], check[0]["dur"], user
+                ),
                 reply_markup=InlineKeyboardMarkup(button),
             )
             db[chat_id][0]["mystic"] = run
@@ -568,6 +602,7 @@ async def seek_comm(cli, message: Message, _, chat_id):
     duration_played = int(playing[0]["played"])
     duration_to_skip = int(query)
     duration = playing[0]["dur"]
+
     if message.command[0][-2] == "c":
         if (duration_played - duration_to_skip) <= 10:
             return await message.reply_text(
@@ -582,27 +617,48 @@ async def seek_comm(cli, message: Message, _, chat_id):
                 reply_markup=close_markup(_),
             )
         to_seek = duration_played + duration_to_skip + 1
+
     mystic = await message.reply_text(_["admin_24"])
+
     if "vid_" in file_path:
         n, file_path = await YouTube.video(playing[0]["vidid"], True)
         if n == 0:
-            return await message.reply_text(_["admin_22"])
+            return await mystic.edit_text(_["admin_22"])
+
     check = (playing[0]).get("speed_path")
     if check:
         file_path = check
     if "index_" in file_path:
         file_path = playing[0]["vidid"]
+
+    # FIX: wrap seek_stream in a timeout.
+    # For very long files, ntgcalls/ffmpeg must fast-forward the internal
+    # pipeline to the target position — an O(position) operation that can
+    # take tens of seconds or hang entirely on large files. Without this
+    # timeout the handler coroutine suspends forever, making the bot appear
+    # frozen (log still running, all commands silently ignored).
     try:
-        await SHASHA.seek_stream(
-            chat_id, file_path,
-            seconds_to_min(to_seek), duration, playing[0]["streamtype"],
+        await asyncio.wait_for(
+            SHASHA.seek_stream(
+                chat_id, file_path,
+                seconds_to_min(to_seek), duration, playing[0]["streamtype"],
+            ),
+            timeout=SEEK_TIMEOUT,
         )
-    except:
+    except asyncio.TimeoutError:
+        return await mystic.edit_text(
+            "⚠️ Seek timed out — the file may be too large or the target "
+            "position too far. Try a shorter seek or restart playback.",
+            reply_markup=close_markup(_),
+        )
+    except Exception:
         return await mystic.edit_text(_["admin_26"], reply_markup=close_markup(_))
+
     if message.command[0][-2] == "c":
         db[chat_id][0]["played"] -= duration_to_skip
     else:
         db[chat_id][0]["played"] += duration_to_skip
+
     await mystic.edit_text(
         text=_["admin_25"].format(seconds_to_min(to_seek), message.from_user.mention),
         reply_markup=close_markup(_),
@@ -616,7 +672,7 @@ async def seek_comm(cli, message: Message, _, chat_id):
             "play", "vplay", "cplay", "cvplay",
             "playforce", "vplayforce", "cplayforce", "cvplayforce",
         ],
-        prefixes=["/", "!", "%", "", ".", "@", "#"]
+        prefixes=["/", "!", "%", "", ".", "@", "#"],
     )
     & filters.group
     & ~BANNED_USERS
@@ -1428,8 +1484,7 @@ async def stream(
         duration_min = result["dur"]
         status       = True if video else None
 
-        # ✅ THE FIX — re-encode unsupported codecs BEFORE calling join_call.
-        # mtime-based cache validation ensures stale compat files are rebuilt.
+        # ensure_compatible is guarded by semaphore + timeout in stream.py
         file_path = await ensure_compatible(file_path, video=bool(video))
 
         if await is_active_chat(chat_id):
