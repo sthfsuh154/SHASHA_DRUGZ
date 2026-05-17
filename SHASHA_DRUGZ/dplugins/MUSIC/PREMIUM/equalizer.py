@@ -110,11 +110,9 @@ async def apply_eq(chat_id: int, filter_string: str):
     final_filter = BASE_AUDIO_ENGINE
     if filter_string:
         final_filter = f"{BASE_AUDIO_ENGINE},{filter_string}"
-
     current = call_py.get_call(chat_id)
     if not current:
         return False
-
     await call_py.change_stream(
         chat_id,
         AudioPiped(
@@ -201,151 +199,147 @@ def stop_all_loops(chat_id: int):
 # ----------------------------- UI Markups -----------------------------
 def main_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎚 Presets", callback_data="eq_presets")],
-        [InlineKeyboardButton("🎛 10‑Band EQ", callback_data="eq_multiband")],
-        [InlineKeyboardButton("🎧 DJ Mode", callback_data="eq_dj")],
-        [InlineKeyboardButton("🔊 Bass +", callback_data="eq_bass_plus"),
-         InlineKeyboardButton("🔉 Bass -", callback_data="eq_bass_minus")],
-        [InlineKeyboardButton("🔄 Auto BPM", callback_data="eq_toggle_autobpm"),
-         InlineKeyboardButton("🌀 Dynamic EQ", callback_data="eq_toggle_dynamic")],
-        [InlineKeyboardButton("🎛 Reset EQ", callback_data="eq_reset")]
+        [InlineKeyboardButton("🎚 ᴘʀᴇsᴇᴛs", callback_data="eq_presets")],
+        [InlineKeyboardButton("🔊 ʙᴀss +", callback_data="eq_bass_plus"),
+         InlineKeyboardButton("🔉 ʙᴀss -", callback_data="eq_bass_minus")],
+        [InlineKeyboardButton("🔈 ᴠᴏʟ -", callback_data="eq_vol_minus"),
+         InlineKeyboardButton("🔊 ᴠᴏʟ +", callback_data="eq_vol_plus")],
+        [InlineKeyboardButton("🌀 ᴅʏɴᴀᴍɪᴄ ᴇǫ", callback_data="eq_toggle_dynamic")],
+        [InlineKeyboardButton("🎛 ʀᴇsᴇᴛ ᴇǫ", callback_data="eq_reset")]
     ])
 
 def preset_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Bass Boost", callback_data="eq_bass"),
-         InlineKeyboardButton("Extreme Bass", callback_data="eq_extreme_bass")],
-        [InlineKeyboardButton("Vocal Boost", callback_data="eq_vocal"),
-         InlineKeyboardButton("Rock", callback_data="eq_rock")],
-        [InlineKeyboardButton("EDM", callback_data="eq_edm"),
-         InlineKeyboardButton("Jazz", callback_data="eq_jazz")],
-        [InlineKeyboardButton("Nightcore", callback_data="eq_nightcore"),
-         InlineKeyboardButton("Slow + Reverb", callback_data="eq_slow_reverb")],
-        [InlineKeyboardButton("🎛 Back", callback_data="eq_back")]
+        [InlineKeyboardButton("ʙᴀss ʙᴏᴏsᴛ", callback_data="eq_bass"),
+         InlineKeyboardButton("ᴇxᴛʀᴇᴍᴇ ʙᴀss", callback_data="eq_extreme_bass")],
+        [InlineKeyboardButton("ᴠᴏᴄᴀʟ ʙᴏᴏsᴛ", callback_data="eq_vocal"),
+         InlineKeyboardButton("ʀᴏᴄᴋ", callback_data="eq_rock")],
+        [InlineKeyboardButton("ᴇᴅᴍ", callback_data="eq_edm"),
+         InlineKeyboardButton("ᴊᴀᴢᴢ", callback_data="eq_jazz")],
+        [InlineKeyboardButton("ɴɪɢʜᴛᴄᴏʀᴇ", callback_data="eq_nightcore"),
+         InlineKeyboardButton("sʟᴏᴡ + ʀᴇᴠᴇʀʙ", callback_data="eq_slow_reverb")],
+        [InlineKeyboardButton("🎛 ʙᴀᴄᴋ", callback_data="eq_back")]
     ])
 
 # ----------------------------- Live Status Helper -----------------------------
 async def get_status_text(chat_id: int):
     filter_string, auto_bpm, dynamic_eq = await get_group_eq(chat_id)
     comp = parse_filter(filter_string)
-
-    bass = comp.get("bass", "0")
-    treble = comp.get("treble", "0")
+    bass = comp.get("bass", "g=0")
+    treble = comp.get("treble", "g=0")
     volume = comp.get("volume", "1.0")
     try:
         vol_percent = int(float(volume) * 100)
     except:
         vol_percent = 100
-
     effects = []
     for effect in ["echo", "reverb", "aecho", "apulsator", "pan"]:
         if effect in comp:
             effects.append(effect)
-
-    status = f"**🎛 SHASHA Premium Equalizer**\n\n"
-    status += f"🔊 **Bass:** `{bass}`\n"
-    status += f"🎵 **Treble:** `{treble}`\n"
-    status += f"🔉 **Volume:** `{vol_percent}%`\n"
-    status += f"🔄 **Auto BPM:** `{'ON' if auto_bpm else 'OFF'}`\n"
-    status += f"🌀 **Dynamic EQ:** `{'ON' if dynamic_eq else 'OFF'}`\n"
+    status = f"<blockquote>**🎛 sʜᴀsʜᴀ ᴘʀᴇᴍɪᴜᴍ ᴇǫᴜᴀʟɪᴢᴇʀ**</blockquote>\n"
+    status += f"<blockquote>🔊 **ʙᴀss:** `{bass}`\n"
+    status += f"🎵 **ᴛʀᴇʙʟᴇ:** `{treble}`\n"
+    status += f"🔉 **ᴠᴏʟᴜᴍᴇ:** `{vol_percent}%`\n"
+    status += f"🔄 **ᴀᴜᴛᴏ ʙᴘᴍ:** `{'ON' if auto_bpm else 'OFF'}`\n"
+    status += f"🌀 **ᴅʏɴᴀᴍɪᴄ ᴇǫ:** `{'ON' if dynamic_eq else 'OFF'}`\n</blockquote>"
     if effects:
-        status += f"🎶 **Effects:** `{', '.join(effects)}`\n"
+        status += f"<blockquote>🎶 **ᴇғғᴇᴄᴛs:** `{', '.join(effects)}`</blockquote>\n"
     return status
 
 # ----------------------------- Command Handlers -----------------------------
 @Client.on_message(filters.command(["equalizer", "eq"]) & filters.group)
-async def equalizer_cmd(client, message):
+async def equalizer_cmd(_, message):
     chat_id = message.chat.id
     status = await get_status_text(chat_id)
     await message.reply(status, reply_markup=main_menu())
 
+
 @Client.on_message(filters.command("resetequalizer") & filters.group)
-async def reset_eq(client, message):
+async def reset_eq(_, message):
     try:
         member = await app.get_chat_member(message.chat.id, message.from_user.id)
         if not member.privileges.can_manage_voice_chats:
             raise ChatAdminRequired
     except:
-        await message.reply("❌ Only group admins can reset the equalizer.")
+        await message.reply("<blockquote>❌ ᴏɴʟʏ ɢʀᴏᴜᴘ ᴀᴅᴍɪɴs ᴄᴀɴ ʀᴇsᴇᴛ ᴛʜᴇ ᴇǫᴜᴀʟɪᴢᴇʀ.</blockquote>")
         return
-
     chat_id = message.chat.id
     stop_all_loops(chat_id)
     await apply_eq(chat_id, "")
     await GROUP_EQ_DB.delete_one({"chat_id": chat_id})
-    await message.reply("✅ Equalizer fully reset for this group.")
+    await message.reply("<blockquote>✅ ᴇǫᴜᴀʟɪᴢᴇʀ ғᴜʟʟʏ ʀᴇsᴇᴛ ғᴏʀ ᴛʜɪs ɢʀᴏᴜᴘ.</blockquote>")
+
 
 @Client.on_message(filters.command(["vol", "volume"]) & filters.group)
-async def volume_cmd(client, message):
+async def volume_cmd(_, message):
     if len(message.command) < 2:
-        return await message.reply("Usage: `/vol 150` (0‑200)")
-
+        return await message.reply("<blockquote>ᴜsᴀɢᴇ: `/vol 150` (0‑200)</blockquote>")
     try:
         vol = int(message.command[1])
         if vol < MIN_VOL or vol > MAX_VOL:
             raise ValueError
     except:
-        return await message.reply(f"Volume must be an integer between {MIN_VOL} and {MAX_VOL}.")
-
+        return await message.reply(
+            f"<blockquote>❌ ᴠᴏʟᴜᴍᴇ ᴍᴜsᴛ ʙᴇ ᴀ ɴᴜᴍʙᴇʀ ʙᴇᴛᴡᴇᴇɴ {MIN_VOL} ᴀɴᴅ {MAX_VOL}.</blockquote>"
+        )
     chat_id = message.chat.id
     current_filter, auto_bpm, dynamic_eq = await get_group_eq(chat_id)
     comp = parse_filter(current_filter)
     gain = vol / 100.0
     comp["volume"] = str(gain)
     new_filter = build_filter(comp)
-    await apply_eq(chat_id, new_filter)
-    await message.reply(f"🔊 Volume set to **{vol}%**")
+    ok = await apply_eq(chat_id, new_filter)
+    if not ok:
+        return await message.reply("<blockquote>❌ ɴᴏ ᴀᴄᴛɪᴠᴇ ᴠᴏɪᴄᴇ ᴄᴀʟʟ ғᴏᴜɴᴅ ɪɴ ᴛʜɪs ɢʀᴏᴜᴘ.</blockquote>")
+    await message.reply(f"<blockquote>🔊 ᴠᴏʟᴜᴍᴇ sᴇᴛ ᴛᴏ **{vol}%**</blockquote>")
+
 
 @Client.on_message(filters.command("bass") & filters.group)
-async def bass_cmd(client, message):
+async def bass_cmd(_, message):
     chat_id = message.chat.id
     current_filter, auto_bpm, dynamic_eq = await get_group_eq(chat_id)
     comp = parse_filter(current_filter)
-
     if len(message.command) == 1:
         comp["bass"] = "g=8"
         new_filter = build_filter(comp)
         await apply_eq(chat_id, new_filter)
-        return await message.reply("🔊 Bass boosted (default level 8)")
-
+        return await message.reply("<blockquote>🔊 ʙᴀss ʙᴏᴏsᴛᴇᴅ (ᴅᴇғᴀᴜʟᴛ ʟᴇᴠᴇʟ 8)</blockquote>")
     try:
         gain = int(message.command[1])
         if gain < 0 or gain > 30:
             raise ValueError
     except:
-        return await message.reply("Bass gain must be 0‑30 (e.g., `/bass 12`)")
-
+        return await message.reply("<blockquote>ʙᴀss ɢᴀɪɴ ᴍᴜsᴛ ʙᴇ 0‑30 (e.g., `/bass 12`)</blockquote>")
     comp["bass"] = f"g={gain}"
     new_filter = build_filter(comp)
     await apply_eq(chat_id, new_filter)
-    await message.reply(f"🔊 Bass set to **{gain}**")
+    await message.reply(f"<blockquote>🔊 ʙᴀss sᴇᴛ ᴛᴏ **{gain}**</blockquote>")
+
 
 @Client.on_message(filters.command("treble") & filters.group)
-async def treble_cmd(client, message):
+async def treble_cmd(_, message):
     chat_id = message.chat.id
     current_filter, auto_bpm, dynamic_eq = await get_group_eq(chat_id)
     comp = parse_filter(current_filter)
-
     if len(message.command) == 1:
         comp["treble"] = "g=6"
         new_filter = build_filter(comp)
         await apply_eq(chat_id, new_filter)
-        return await message.reply("🎵 Treble boosted (default level 6)")
-
+        return await message.reply("<blockquote>🎵 ᴛʀᴇʙʟᴇ ʙᴏᴏsᴛᴇᴅ (ᴅᴇғᴀᴜʟᴛ ʟᴇᴠᴇʟ 6)</blockquote>")
     try:
         gain = int(message.command[1])
         if gain < 0 or gain > 20:
             raise ValueError
     except:
-        return await message.reply("Treble gain must be 0‑20 (e.g., `/treble 8`)")
-
+        return await message.reply("<blockquote>ᴛʀᴇʙʟᴇ ɢᴀɪɴ ᴍᴜsᴛ ʙᴇ 0‑20 (e.g., `/treble 8`)</blockquote>")
     comp["treble"] = f"g={gain}"
     new_filter = build_filter(comp)
     await apply_eq(chat_id, new_filter)
-    await message.reply(f"🎵 Treble set to **{gain}**")
+    await message.reply(f"<blockquote>🎵 ᴛʀᴇʙʟᴇ sᴇᴛ ᴛᴏ **{gain}**</blockquote>")
+
 
 @Client.on_message(filters.command(list(EQ_PRESETS.keys())) & filters.group)
-async def preset_cmd(client, message):
+async def preset_cmd(_, message):
     cmd = message.command[0].lower()
     if cmd in EQ_PRESETS:
         chat_id = message.chat.id
@@ -353,15 +347,15 @@ async def preset_cmd(client, message):
         comp = parse_filter(preset_filter)
         new_filter = build_filter(comp)
         await apply_eq(chat_id, new_filter)
-        await message.reply(f"✅ Preset **{cmd.capitalize()}** applied.")
+        await message.reply(f"<blockquote>✅ ᴘʀᴇsᴇᴛ **{cmd.capitalize()}** ᴀᴘᴘʟɪᴇᴅ.</blockquote>")
+
 
 @Client.on_message(filters.command("autobpm") & filters.group)
-async def autobpm_toggle_cmd(client, message):
+async def autobpm_toggle_cmd(_, message):
     chat_id = message.chat.id
     current_filter, auto_bpm, dynamic_eq = await get_group_eq(chat_id)
     new_state = not auto_bpm
     await save_group_eq(chat_id, current_filter, new_state, dynamic_eq)
-
     if new_state:
         start_auto_bpm(chat_id)
         await message.reply("✅ Auto BPM mode **enabled** (simulated).")
@@ -369,19 +363,19 @@ async def autobpm_toggle_cmd(client, message):
         stop_auto_bpm(chat_id)
         await message.reply("❌ Auto BPM mode **disabled**.")
 
+
 @Client.on_message(filters.command("dynamiceq") & filters.group)
-async def dynamiceq_toggle_cmd(client, message):
+async def dynamiceq_toggle_cmd(_, message):
     chat_id = message.chat.id
     current_filter, auto_bpm, dynamic_eq = await get_group_eq(chat_id)
     new_state = not dynamic_eq
     await save_group_eq(chat_id, current_filter, auto_bpm, new_state)
-
     if new_state:
         start_dynamic(chat_id)
-        await message.reply("✅ Dynamic EQ mode **enabled** (cycling presets).")
+        await message.reply("<blockquote>✅ ᴅʏɴᴀᴍɪᴄ ᴇǫ ᴍᴏᴅᴇ **ᴇɴᴀʙʟᴇᴅ** (ᴄʏᴄʟɪɴɢ ᴘʀᴇsᴇᴛs).</blockquote>")
     else:
         stop_dynamic(chat_id)
-        await message.reply("❌ Dynamic EQ mode **disabled**.")
+        await message.reply("<blockquote>❌ ᴅʏɴᴀᴍɪᴄ ᴇǫ ᴍᴏᴅᴇ **ᴅɪsᴀʙʟᴇᴅ**.</blockquote>")
 
 # ----------------------------- Callback Handlers -----------------------------
 @Client.on_callback_query(filters.regex("^eq_"))
@@ -390,7 +384,7 @@ async def eq_callback(_, query: CallbackQuery):
     chat_id = query.message.chat.id
 
     if data == "presets":
-        await query.message.edit_text("🎚 **Select Preset:**", reply_markup=preset_menu())
+        await query.message.edit_text("<blockquote>🎚 **sᴇʟᴇᴄᴛ ᴘʀᴇsᴇᴛ:**</blockquote>", reply_markup=preset_menu())
         return
 
     if data == "back":
@@ -401,7 +395,7 @@ async def eq_callback(_, query: CallbackQuery):
     if data == "reset":
         stop_all_loops(chat_id)
         await apply_eq(chat_id, "")
-        await query.answer("EQ Reset ✅")
+        await query.answer("ᴇǫ ʀᴇsᴇᴛ ✅")
         status = await get_status_text(chat_id)
         await query.message.edit_text(status, reply_markup=main_menu())
         return
@@ -436,6 +430,38 @@ async def eq_callback(_, query: CallbackQuery):
         new_filter = build_filter(comp)
         await apply_eq(chat_id, new_filter)
         await query.answer(f"Bass reduced to {new_val}")
+        status = await get_status_text(chat_id)
+        await query.message.edit_text(status, reply_markup=main_menu())
+        return
+
+    if data == "vol_plus":
+        current_filter, _, _ = await get_group_eq(chat_id)
+        comp = parse_filter(current_filter)
+        try:
+            current_vol = int(float(comp.get("volume", "1.0")) * 100)
+        except:
+            current_vol = 100
+        new_vol = min(current_vol + 10, MAX_VOL)
+        comp["volume"] = str(new_vol / 100.0)
+        new_filter = build_filter(comp)
+        await apply_eq(chat_id, new_filter)
+        await query.answer(f"Volume increased to {new_vol}%")
+        status = await get_status_text(chat_id)
+        await query.message.edit_text(status, reply_markup=main_menu())
+        return
+
+    if data == "vol_minus":
+        current_filter, _, _ = await get_group_eq(chat_id)
+        comp = parse_filter(current_filter)
+        try:
+            current_vol = int(float(comp.get("volume", "1.0")) * 100)
+        except:
+            current_vol = 100
+        new_vol = max(current_vol - 10, MIN_VOL)
+        comp["volume"] = str(new_vol / 100.0)
+        new_filter = build_filter(comp)
+        await apply_eq(chat_id, new_filter)
+        await query.answer(f"Volume decreased to {new_vol}%")
         status = await get_status_text(chat_id)
         await query.message.edit_text(status, reply_markup=main_menu())
         return
@@ -501,7 +527,7 @@ async def eq_callback(_, query: CallbackQuery):
         comp = parse_filter(preset_filter)
         new_filter = build_filter(comp)
         await apply_eq(chat_id, new_filter)
-        await query.answer(f"{data.replace('_',' ').title()} Applied ✅")
+        await query.answer(f"{data.replace('_', ' ').title()} Applied ✅")
         status = await get_status_text(chat_id)
         await query.message.edit_text(status, reply_markup=main_menu())
         return
@@ -512,41 +538,48 @@ async def cleanup_on_call_end(_, chat_id: int):
 
 # Register the cleanup function on all available PyTgCalls clients
 for client in [call_py.one, call_py.two, call_py.three, call_py.four, call_py.five]:
-    if client:  # client may be None if the corresponding string is missing
+    if client:
         client.on_kicked()(cleanup_on_call_end)
         client.on_closed_voice_chat()(cleanup_on_call_end)
-
 
 __menu__ = "CMD_MUSIC"
 __mod_name__ = "H_B_41"
 __help__ = """
-🔻 /equalizer | /eq ➠ ᴏᴘᴇɴꜱ ᴇQ ᴄᴏɴᴛʀᴏʟ ᴘᴀɴᴇʟ
-🔻 /resetequalizer ➠ ʀᴇꜱᴇᴛꜱ ᴇQ
-🔻 /vol | /volume 0-200 ➠ ᴠᴏʟᴜᴍᴇ ᴄᴏɴᴛʀᴏʟ
-🔻 /bass 0-30 ➠ ᴄᴜꜱᴛᴏᴍ ʙᴀꜱꜱ
-🔻 /treble | /treble 0-20 ➠ ᴛʀᴇʙʟᴇ ᴄᴏɴᴛʀᴏʟ
-🔻 /autobpm ➠ ᴀᴜᴛᴏ ʙᴘᴍ (ᴏɴ/ᴏꜰꜰ)
-🔻 /dynamiceq ➠ ᴅʏɴᴀᴍɪᴄ ᴇQ
-🔻 /normal | /flat ➠ ꜰʟᴀᴛ ᴇQ
-🔻 /bass ➠ ʙᴀꜱꜱ ʙᴏᴏꜱᴛ
-🔻 /extreme_bass ➠ ᴇxᴛʀᴇᴍᴇ ʙᴀꜱꜱ
-🔻 /triple_bass ➠ ᴜʟᴛʀᴀ ʙᴀꜱꜱ
-🔻 /soft_bass ➠ ʟɪɢʜᴛ ʙᴀꜱꜱ
-🔻 /deep_sub ➠ ꜱᴜʙ-ʙᴀꜱꜱ
-🔻 /bass_clean ➠ ᴄʟᴇᴀɴ ʙᴀꜱꜱ
-🔻 /vocal | /clear_voice ➠ ᴄʟᴇᴀʀ ᴠᴏɪᴄᴇ
-🔻 /dialogue ➠ ᴅɪᴀʟᴏɢᴜᴇ ꜰᴏᴄᴜꜱ
-🔻 /karaoke ➠ ᴠᴏᴄᴀʟ ʀᴇᴍᴏᴠᴀʟ
-🔻 /classical /pop /rock /jazz /edm ➠ ᴍᴜꜱɪᴄ ᴘʀᴇꜱᴇᴛꜱ
-🔻 /party ➠ ʜɪɢʜ ʙᴀꜱꜱ & ᴛʀᴇʙʟᴇ
-🔻 /night ➠ ʟᴏᴡ ᴠᴏʟᴜᴍᴇ
-🔻 /soft ➠ ꜱᴏꜰᴛ ᴀᴜᴅɪᴏ
-🔻 /nightcore ➠ ꜰᴀꜱᴛ & ᴘɪᴛᴄʜᴇᴅ
-🔻 /slow_reverb ➠ ꜱʟᴏᴡ + ʀᴇᴠᴇʀʙ
-🔻 /echo | /reverb ➠ ᴀᴜᴅɪᴏ ꜰx
-🔻 /8d ➠ 8ᴅ ꜱᴘᴀᴛɪᴀʟ
-🔻 /chipmunk ➠ ʜɪɢʜ ᴘɪᴛᴄʜ
-🔻 /deep_voice ➠ ᴅᴇᴇᴘ ᴠᴏɪᴄᴇ
+🔻 /equalizer | /eq ➠ ᴏᴘᴇɴꜱ ᴛʜᴇ ᴇQᴜᴀʟɪᴢᴇʀ ᴄᴏɴᴛʀᴏʟ ᴘᴀɴᴇʟ.
+🔻 /resetequalizer ➠ ʀᴇꜱᴇᴛꜱ ᴛʜᴇ ᴇQᴜᴀʟɪᴢᴇʀ ꜰᴜʟʟʏ (ᴀᴅᴍɪɴꜱ ᴏɴʟʏ).
+🔻 /vol 0-200 | /volume 0-200 ➠ ꜱᴇᴛꜱ ᴛʜᴇ ᴘʟᴀʏʙᴀᴄᴋ ᴠᴏʟᴜᴍᴇ.
+🔻 /bass 0-30 ➠ ꜱᴇᴛꜱ ᴄᴜꜱᴛᴏᴍ ʙᴀꜱꜱ ʟᴇᴠᴇʟ.
+🔻 /treble ➠ ʙᴏᴏꜱᴛꜱ ᴛʀᴇʙʟᴇ ᴛᴏ ᴅᴇꜰᴀᴜʟᴛ ʟᴇᴠᴇʟ.
+🔻 /treble 0-20 ➠ ꜱᴇᴛꜱ ᴄᴜꜱᴛᴏᴍ ᴛʀᴇʙʟᴇ ʟᴇᴠᴇʟ.
+🔻 /autobpm ➠ ᴛᴏɢɢʟᴇꜱ ᴀᴜᴛᴏ ʙᴘᴍ ᴍᴏᴅᴇ (ᴏɴ / ᴏꜰꜰ).
+🔻 /dynamiceq ➠ ᴛᴏɢɢʟᴇꜱ ᴅʏɴᴀᴍɪᴄ ᴇQ ᴍᴏᴅᴇ.
+🔻 /normal ➠ ʀᴇꜱᴇᴛꜱ ᴇQ ᴛᴏ ꜰʟᴀᴛ ᴍᴏᴅᴇ.
+🔻 /bass ➠ ᴇɴᴀʙʟᴇꜱ ʙᴀꜱꜱ ʙᴏᴏꜱᴛ.
+🔻 /extreme_bass ➠ ᴇɴᴀʙʟᴇꜱ ᴇxᴛʀᴇᴍᴇ ʙᴀꜱꜱ.
+🔻 /vocal ➠ ʙᴏᴏꜱᴛꜱ ᴠᴏᴄᴀʟ ᴄʟᴀʀɪᴛʏ.
+🔻 /classical ➠ ᴄʟᴀꜱꜱɪᴄᴀʟ ᴍᴜꜱɪᴄ ᴇQ ᴘʀᴇꜱᴇᴛ.
+🔻 /pop ➠ ᴘᴏᴘ ᴍᴜꜱɪᴄ ᴇQ ᴘʀᴇꜱᴇᴛ.
+🔻 /rock ➠ ʀᴏᴄᴋ ᴍᴜꜱɪᴄ ᴇQ ᴘʀᴇꜱᴇᴛ.
+🔻 /jazz ➠ ᴊᴀᴢᴢ ᴍᴜꜱɪᴄ ᴇQ ᴘʀᴇꜱᴇᴛ.
+🔻 /edm ➠ ᴇᴅᴍ ᴍᴜꜱɪᴄ ᴇQ ᴘʀᴇꜱᴇᴛ.
+🔻 /party ➠ ʜɪɢʜ ʙᴀꜱꜱ & ᴛʀᴇʙʟᴇ ᴘᴀʀᴛʏ ᴍᴏᴅᴇ.
+🔻 /night ➠ ʟᴏᴡ ᴠᴏʟᴜᴍᴇ ɴɪɢʜᴛ ᴍᴏᴅᴇ.
+🔻 /soft ➠ ꜱᴏꜰᴛ ᴀᴜᴅɪᴏ ᴇQ.
+🔻 /flat ➠ ᴅɪꜱᴀʙʟᴇꜱ ᴀʟʟ ᴇQ ᴇꜰꜰᴇᴄᴛꜱ.
+🔻 /triple_bass ➠ ᴜʟᴛʀᴀ ʙᴀꜱꜱ ᴍᴏᴅᴇ.
+🔻 /deep_sub ➠ ᴅᴇᴇᴘ ꜱᴜʙ-ʙᴀꜱꜱ ᴇɴʜᴀɴᴄᴇᴍᴇɴᴛ.
+🔻 /soft_bass ➠ ʟɪɢʜᴛ ʙᴀꜱꜱ ʙᴏᴏꜱᴛ.
+🔻 /bass_clean ➠ ᴄʟᴇᴀɴ ʙᴀꜱꜱ ᴡɪᴛʜ ʟᴏᴡ ɴᴏɪꜱᴇ.
+🔻 /clear_voice ➠ ᴄʟᴇᴀʀ ᴠᴏɪᴄᴇ ᴇɴʜᴀɴᴄᴇᴍᴇɴᴛ.
+🔻 /dialogue ➠ ᴅɪᴀʟᴏɢᴜᴇ ꜰᴏᴄᴜꜱ ᴍᴏᴅᴇ.
+🔻 /karaoke ➠ ᴠᴏᴄᴀʟ ʀᴇᴍᴏᴠᴀʟ (ᴋᴀʀᴀᴏᴋᴇ ᴍᴏᴅᴇ).
+🔻 /nightcore ➠ ꜰᴀꜱᴛ & ᴘɪᴛᴄʜᴇᴅ ɴɪɢʜᴛᴄᴏʀᴇ ᴍᴏᴅᴇ.
+🔻 /slow_reverb ➠ ꜱʟᴏᴡ ᴀᴜᴅɪᴏ ᴡɪᴛʜ ʀᴇᴠᴇʀʙ.
+🔻 /echo ➠ ᴇᴄʜᴏ ᴀᴜᴅɪᴏ ᴇꜰꜰᴇᴄᴛ.
+🔻 /reverb ➠ ʀᴇᴠᴇʀʙ ᴀᴜᴅɪᴏ ᴇꜰꜰᴇᴄᴛ.
+🔻 /8d ➠ 8ᴅ ꜱᴘᴀᴛɪᴀʟ ᴀᴜᴅɪᴏ ᴇꜰꜰᴇᴄᴛ.
+🔻 /chipmunk ➠ ʜɪɢʜ-ᴘɪᴛᴄʜ ᴠᴏɪᴄᴇ ᴇꜰꜰᴇᴄᴛ.
+🔻 /deep_voice ➠ ᴅᴇᴇᴘ ᴠᴏɪᴄᴇ ᴇꜰꜰᴇᴄᴛ.
 """
 
 MOD_TYPE = "MUSIC"
