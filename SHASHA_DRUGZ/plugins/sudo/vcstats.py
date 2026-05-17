@@ -24,8 +24,6 @@ from SHASHA_DRUGZ.utils.database import (
 )
 
 LOGGER = getLogger(__name__)
-#print("vcstats] Loaded: /vcstats, /activevc, /activevideo")
-
 
 # ════════════════════════════════════════════
 # REAL-TIME LIVE VC DETECTION
@@ -33,8 +31,8 @@ LOGGER = getLogger(__name__)
 
 async def is_vc_actually_active(chat_id: int) -> bool:
     """
-    Check if there is an ACTUAL live group call in a chat right now
-    using the raw Telegram API. This is the ground truth — not the DB.
+    Check via the raw Telegram API whether a live group call is
+    actually running in the given chat right now.
     """
     try:
         full = await app.invoke(
@@ -51,37 +49,49 @@ async def is_vc_actually_active(chat_id: int) -> bool:
 
 async def get_live_active_chats():
     """
-    Cross-reference DB active chats with real Telegram API.
-    Returns only chats where a live VC is actually running.
-    Stale DB entries (bot left but DB not cleaned) are auto-removed.
+    Cross-reference DB entries with the real Telegram API.
+
+    Key logic:
+      • A chat present in db_video  → counted as VIDEO   (never as audio)
+      • A chat present in db_audio
+        BUT NOT in db_video         → counted as AUDIO ONLY
+      • A chat in both collections  → counted as VIDEO only
+        (video streams always carry audio; we must not double-count)
+
+    This ensures:
+      - Playing audio only  → increments audio count only
+      - Playing video only  → increments video count only
+      - Playing video (with audio track) → video count only, NOT audio
     """
     db_audio = await get_active_chats()
     db_video = await get_active_video_chats()
 
-    # Combine and deduplicate all tracked chats
-    all_chat_ids = list(set(db_audio + db_video))
+    db_audio_set = set(db_audio)
+    db_video_set = set(db_video)
 
-    live_audio = []
-    live_video = []
+    all_chat_ids = list(db_audio_set | db_video_set)
 
-    async def check_chat(chat_id):
+    live_audio = []   # pure audio-only chats
+    live_video = []   # video chats (may carry audio stream, but counted as video)
+
+    async def check_chat(chat_id: int):
         alive = await is_vc_actually_active(chat_id)
         if alive:
-            if chat_id in db_audio:
-                live_audio.append(chat_id)
-            if chat_id in db_video:
+            if chat_id in db_video_set:
+                # Video (with or without separate audio entry) → VIDEO bucket only
                 live_video.append(chat_id)
+            elif chat_id in db_audio_set:
+                # Audio only (no video) → AUDIO bucket
+                live_audio.append(chat_id)
         else:
-            # VC is gone — clean up stale DB entries silently
-            if chat_id in db_audio:
+            # VC is gone — silently clean up stale DB entries
+            if chat_id in db_audio_set:
                 await remove_active_chat(chat_id)
-            if chat_id in db_video:
+            if chat_id in db_video_set:
                 await remove_active_video_chat(chat_id)
             LOGGER.debug(f"Removed stale VC entry for chat {chat_id}")
 
-    # Run all checks concurrently for speed
     await asyncio.gather(*[check_chat(cid) for cid in all_chat_ids], return_exceptions=True)
-
     return live_audio, live_video
 
 
@@ -89,11 +99,7 @@ async def get_live_active_chats():
 # CACHE (avoid hammering API on every button press)
 # ════════════════════════════════════════════
 
-_cache = {
-    "audio": [],
-    "video": [],
-    "timestamp": 0,
-}
+_cache = {"audio": [], "video": [], "timestamp": 0}
 CACHE_DURATION = 10  # seconds
 
 
@@ -103,10 +109,9 @@ async def get_cached_stats(force_refresh: bool = False):
     now = time.time()
     if not force_refresh and (now - _cache["timestamp"]) <= CACHE_DURATION:
         return _cache["audio"], _cache["video"]
-
     audio, video = await get_live_active_chats()
-    _cache["audio"] = audio
-    _cache["video"] = video
+    _cache["audio"]     = audio
+    _cache["video"]     = video
     _cache["timestamp"] = now
     return audio, video
 
@@ -118,17 +123,12 @@ async def get_cached_stats(force_refresh: bool = False):
 def paginate_list(items, page, per_page=5):
     """Split list into pages. Returns (page_items, total_pages)."""
     start = (page - 1) * per_page
-    end = start + per_page
-    sliced = items[start:end]
+    sliced = items[start: start + per_page]
     total_pages = max(1, (len(items) - 1) // per_page + 1) if items else 1
     return sliced, total_pages
 
 
-async def safe_edit_caption(
-    msg: Message,
-    caption: str,
-    reply_markup: InlineKeyboardMarkup = None,
-):
+async def safe_edit_caption(msg: Message, caption: str, reply_markup=None):
     """Edit caption safely without triggering MessageNotModified."""
     try:
         existing = msg.caption or ""
@@ -153,10 +153,10 @@ async def safe_edit_caption(
 async def get_chat_info_and_link(chat_id: int):
     """
     Fetch chat title and invite link.
-    Returns (title, invite_link, username) or None if chat is inaccessible.
+    Returns (title, invite_link, username) or None if inaccessible.
     """
     try:
-        chat = await app.get_chat(chat_id)
+        chat  = await app.get_chat(chat_id)
         title = chat.title or "Private Group"
         username = chat.username
         try:
@@ -178,22 +178,29 @@ def build_main_keyboard(auto: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🎥 𝐕ɪᴅᴇᴏ 𝐂ʜᴀᴛ", callback_data="vc_video_page_1"),
         ],
         [
-            InlineKeyboardButton("🔁 𝐑ᴇғʀᴇ𝗌ʜ", callback_data="vc_refresh_manual"),
-            InlineKeyboardButton("⏳ 𝐀ᴜᴛᴏ", callback_data="vc_enable_autorefresh"),
+            InlineKeyboardButton("🔁 𝐑ᴇғʀᴇ𝗌ʜ",  callback_data="vc_refresh_manual"),
+            InlineKeyboardButton("⏳ 𝐀ᴜᴛᴏ",      callback_data="vc_enable_autorefresh"),
         ],
         [InlineKeyboardButton("🔻 𝐂ʟᴏ𝗌ᴇ 🔻", callback_data="vc_close")],
     ]
     if auto:
-        rows[1] = [InlineKeyboardButton("🛑 𝐒ᴛᴏᴘ 𝐀ᴜᴛᴏ", callback_data="vc_stop_autorefresh")]
+        rows[1] = [
+            InlineKeyboardButton("🛑 𝐒ᴛᴏᴘ 𝐀ᴜᴛᴏ", callback_data="vc_stop_autorefresh")
+        ]
     return InlineKeyboardMarkup(rows)
 
 
 def build_stats_caption(audio: list, video: list, mode: str = "") -> str:
+    """
+    audio  = list of chat IDs playing AUDIO ONLY
+    video  = list of chat IDs playing VIDEO (video-only, no double-count with audio)
+    """
     audio_count = len(audio)
     video_count = len(video)
     audio_light = "🍏" if audio_count > 0 else "🍎"
     video_light = "🍏" if video_count > 0 else "🍎"
-    mode_tag = f" ({mode})" if mode else ""
+    mode_tag    = f" ({mode})" if mode else ""
+
     return (
         f"<blockquote>💥 <b>𝐋ɪᴠᴇ 𝐕ᴄ𝐒ᴛᴀᴛ𝗌{mode_tag}</b></blockquote>\n"
         f"<blockquote>•━━━━━━━━━━━━━━━━━━•\n"
@@ -218,9 +225,9 @@ async def vcstats_handler(client, msg: Message):
     if msg.from_user.id not in SUDOERS:
         return await msg.reply_text("❌ Only SUDO users can use this command.")
 
-    wait = await msg.reply_text("⏳ Fetching live VC data...")
+    wait  = await msg.reply_text("⏳ Fetching live VC data...")
     audio, video = await get_cached_stats(force_refresh=True)
-    caption = build_stats_caption(audio, video)
+    caption  = build_stats_caption(audio, video)
     keyboard = build_main_keyboard()
 
     try:
@@ -232,7 +239,6 @@ async def vcstats_handler(client, msg: Message):
         START_IMG_URL,
         caption=caption,
         reply_markup=keyboard,
-        #parse_mode="html",
     )
 
 
@@ -244,7 +250,6 @@ async def vcstats_handler(client, msg: Message):
 async def vc_refresh_manual(client, cq: CallbackQuery):
     if cq.from_user.id not in SUDOERS:
         return await cq.answer("❌ Unauthorized", show_alert=True)
-
     await cq.answer("🔁 Refreshing...")
     audio, video = await get_cached_stats(force_refresh=True)
     caption = build_stats_caption(audio, video, mode="Refreshed")
@@ -252,10 +257,10 @@ async def vc_refresh_manual(client, cq: CallbackQuery):
 
 
 # ════════════════════════════════════════════
-# CALLBACK: Auto Refresh (5 minutes, 10s interval)
+# CALLBACK: Auto Refresh (5 minutes, 10 s interval)
 # ════════════════════════════════════════════
 
-_auto_refresh_active: set = set()  # track which messages have auto-refresh running
+_auto_refresh_active: set = set()
 
 
 @app.on_callback_query(filters.regex("^vc_enable_autorefresh$"))
@@ -271,12 +276,12 @@ async def vc_enable_autorefresh(client, cq: CallbackQuery):
     _auto_refresh_active.add(msg_id)
     msg = cq.message
 
-    for _ in range(30):  # 30 × 10s = 5 minutes
+    for _ in range(30):   # 30 × 10 s = 5 minutes
         if msg_id not in _auto_refresh_active:
             break
         try:
             audio, video = await get_cached_stats(force_refresh=True)
-            caption = build_stats_caption(audio, video, mode="Auto")
+            caption  = build_stats_caption(audio, video, mode="Auto")
             keyboard = build_main_keyboard(auto=True)
             await safe_edit_caption(msg, caption, keyboard)
         except Exception as e:
@@ -297,8 +302,7 @@ async def vc_enable_autorefresh(client, cq: CallbackQuery):
 
 @app.on_callback_query(filters.regex("^vc_stop_autorefresh$"))
 async def stop_autorefresh(client, cq: CallbackQuery):
-    msg_id = cq.message.id
-    _auto_refresh_active.discard(msg_id)
+    _auto_refresh_active.discard(cq.message.id)
     await cq.answer("🛑 Auto‑refresh stopped", show_alert=True)
 
 
@@ -329,12 +333,11 @@ async def audio_page(client, cq: CallbackQuery):
     page_items, total_pages = paginate_list(audio, page, per_page=5)
 
     if not audio:
-        text = "<b>🎧 No active audio chats right now.</b>"
+        text    = "<b>🎧 No active audio chats right now.</b>"
         buttons = [[InlineKeyboardButton("🔻 𝐁ᴀᴄᴋ", callback_data="vc_refresh_manual")]]
     else:
-        text = f"<b>🎧 Active Audio Chats (Page {page}/{total_pages})</b>\n\n"
+        text         = f"<b>🎧 Active Audio Chats (Page {page}/{total_pages})</b>\n\n"
         chat_buttons = []
-
         for idx, cid in enumerate(page_items, 1):
             info = await get_chat_info_and_link(cid)
             if info is None:
@@ -377,12 +380,11 @@ async def video_page(client, cq: CallbackQuery):
     page_items, total_pages = paginate_list(video, page, per_page=5)
 
     if not video:
-        text = "<b>🎥 No active video chats right now.</b>"
+        text    = "<b>🎥 No active video chats right now.</b>"
         buttons = [[InlineKeyboardButton("🔻 𝐁ᴀᴄᴋ", callback_data="vc_refresh_manual")]]
     else:
-        text = f"<b>🎥 Active Video Chats (Page {page}/{total_pages})</b>\n\n"
+        text         = f"<b>🎥 Active Video Chats (Page {page}/{total_pages})</b>\n\n"
         chat_buttons = []
-
         for idx, cid in enumerate(page_items, 1):
             info = await get_chat_info_and_link(cid)
             if info is None:
@@ -412,7 +414,7 @@ async def video_page(client, cq: CallbackQuery):
 
 
 # ════════════════════════════════════════════
-# LEGACY COMMANDS: /activevc and /activevideo
+# LEGACY COMMANDS: /activevc  and  /activevideo
 # ════════════════════════════════════════════
 
 @app.on_message(
@@ -434,9 +436,8 @@ async def activevc_direct(client, message: Message):
         return await message.reply_text("» ɴᴏ ᴀᴄᴛɪᴠᴇ ᴠᴏɪᴄᴇ ᴄʜᴀᴛs ᴏɴ ᴛʜᴇ ʙᴏᴛ.")
 
     page_items, total_pages = paginate_list(audio, 1, per_page=5)
-    text = f"<b>🎧 Active Audio Chats (Page 1/{total_pages})</b>\n\n"
+    text         = f"<b>🎧 Active Audio Chats (Page 1/{total_pages})</b>\n\n"
     chat_buttons = []
-
     for cid in page_items:
         info = await get_chat_info_and_link(cid)
         if info is None:
@@ -459,7 +460,6 @@ async def activevc_direct(client, message: Message):
         START_IMG_URL,
         caption=text,
         reply_markup=InlineKeyboardMarkup(chat_buttons),
-        #parse_mode="html",
     )
 
 
@@ -482,9 +482,8 @@ async def activevideo_direct(client, message: Message):
         return await message.reply_text("» ɴᴏ ᴀᴄᴛɪᴠᴇ ᴠɪᴅᴇᴏ ᴄʜᴀᴛs ᴏɴ ᴛʜᴇ ʙᴏᴛ.")
 
     page_items, total_pages = paginate_list(video, 1, per_page=5)
-    text = f"<b>🎥 Active Video Chats (Page 1/{total_pages})</b>\n\n"
+    text         = f"<b>🎥 Active Video Chats (Page 1/{total_pages})</b>\n\n"
     chat_buttons = []
-
     for cid in page_items:
         info = await get_chat_info_and_link(cid)
         if info is None:
@@ -507,7 +506,6 @@ async def activevideo_direct(client, message: Message):
         START_IMG_URL,
         caption=text,
         reply_markup=InlineKeyboardMarkup(chat_buttons),
-        #parse_mode="html",
     )
 
 
@@ -515,10 +513,10 @@ async def activevideo_direct(client, message: Message):
 # MODULE METADATA
 # ════════════════════════════════════════════
 
-__menu__ = "CMD_MUSIC"
+__menu__     = "CMD_MUSIC"
 __mod_name__ = "H_B_14"
-__help__ = """
+__help__     = """
 🔻 /vcstats /vcstat /vcs ➠ sʜᴏᴡs ʟɪᴠᴇ ᴀᴜᴅɪᴏ & ᴠɪᴅᴇᴏ ᴄʜᴀᴛ sᴛᴀᴛs ᴡɪᴛʜ ɪɴᴛᴇʀᴀᴄᴛɪᴠᴇ ʙᴜᴛᴛᴏɴs
 🔻 /activevoice /activevc ➠ sʜᴏᴡs ᴀʟʟ ᴀᴄᴛɪᴠᴇ ᴀᴜᴅɪᴏ (ᴠᴏɪᴄᴇ) ᴄʜᴀᴛs
-🔻 /activevideo /activev ➠ sʜᴏᴡs ᴀʟʟ ᴀᴄᴛɪᴠᴇ ᴠɪᴅᴇᴏ ᴄʜᴀᴛs
+🔻 /activevideo /activev  ➠ sʜᴏᴡs ᴀʟʟ ᴀᴄᴛɪᴠᴇ ᴠɪᴅᴇᴏ ᴄʜᴀᴛs
 """
