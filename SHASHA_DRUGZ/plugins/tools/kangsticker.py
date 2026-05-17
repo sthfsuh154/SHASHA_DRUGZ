@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pyrogram
 from pyrogram import filters
+from pyrogram.raw import functions as raw_functions
 from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
 from pyrogram.errors import (
     PeerIdInvalid,
@@ -18,6 +19,7 @@ from pyrogram.errors import (
 )
 
 from SHASHA_DRUGZ import app
+from SHASHA_DRUGZ.misc import SUDOERS
 from config import BOT_USERNAME
 from SHASHA_DRUGZ.utils.errors import capture_err
 from SHASHA_DRUGZ.utils.files import (
@@ -38,7 +40,6 @@ from SHASHA_DRUGZ.utils.stickerset import (
 MAX_STICKERS = 120
 STATIC_TYPES = ["jpeg", "png", "webp"]
 
-
 # ------------------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------------------
@@ -48,13 +49,11 @@ def _clean_username(username: str) -> str:
     u = re.sub(r"_{2,}", "_", u)
     return u
 
-
 def _make_packname(bot_username: str, user_id: int, num: int = 0) -> str:
     bot    = _clean_username(bot_username)
     prefix = f"f{num}_" if num else "f"
     name   = f"{prefix}{user_id}_by_{bot}"
     return re.sub(r"_{2,}", "_", name)
-
 
 # ------------------------------------------------------------------------------
 # Video/GIF → .webm sticker conversion
@@ -64,7 +63,6 @@ async def make_video_sticker(
 ):
     """Convert a video / GIF to a Telegram video sticker (.webm)."""
     out = f"sticker_{uuid4().hex}.webm"
-
     try:
         duration = float(
             subprocess.check_output([
@@ -88,7 +86,6 @@ async def make_video_sticker(
         stdout=subprocess.PIPE,
         universal_newlines=True,
     )
-
     last_update = time.time()
     while True:
         line = process.stderr.readline()
@@ -96,7 +93,11 @@ async def make_video_sticker(
             break
         m = re.search(r"time=(\d+):(\d+):([\d.]+)", line)
         if m:
-            current = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+            current = (
+                int(m.group(1)) * 3600
+                + int(m.group(2)) * 60
+                + float(m.group(3))
+            )
             percent = min(current / duration * 100, 100)
             if time.time() - last_update > 1:
                 bar = "█" * int(percent // 10) + "░" * (10 - int(percent // 10))
@@ -105,18 +106,15 @@ async def make_video_sticker(
                 except Exception:
                     pass
                 last_update = time.time()
-
     process.wait()
-    await msg.edit("📤 Uploading sticker...")
 
-    # create_sticker() only takes (document, emoji) — no type flags
+    await msg.edit("📤 Uploading sticker...")
     sticker = await create_sticker(
         await upload_document(client, out, chat_id),
         emoji,
     )
     os.remove(out)
     return sticker
-
 
 # ------------------------------------------------------------------------------
 # Command: /st <sticker_id> – send a sticker by its file_id
@@ -131,14 +129,12 @@ async def generate_sticker(client, message: Message):
     else:
         await message.reply_text("Please provide a sticker ID after /st command.")
 
-
 # ------------------------------------------------------------------------------
 # Command: /packkang – copy an entire sticker pack
 # ------------------------------------------------------------------------------
 @app.on_message(filters.command("packkang"))
 async def _packkang(client, message: Message):
     txt = await message.reply_text("**ᴘʀᴏᴄᴇssɪɴɢ....**")
-
     if not message.reply_to_message:
         return await txt.edit("ʀᴇᴘʟʏ ᴛᴏ ᴍᴇssᴀɢᴇ")
     if not message.reply_to_message.sticker:
@@ -178,9 +174,7 @@ async def _packkang(client, message: Message):
         )
         for doc in stickers.documents
     ]
-
     new_short_name = f"pack{uuid4().hex}_by_{_clean_username(app.me.username)}"
-
     try:
         await app.invoke(
             pyrogram.raw.functions.stickers.CreateStickerSet(
@@ -202,7 +196,6 @@ async def _packkang(client, message: Message):
     except Exception as e:
         await txt.edit(f"Failed: {e}")
 
-
 # ------------------------------------------------------------------------------
 # Command: /stickerid  /stid – get sticker file_id
 # ------------------------------------------------------------------------------
@@ -210,14 +203,12 @@ async def _packkang(client, message: Message):
 async def sticker_id(client, msg: Message):
     if not msg.reply_to_message or not msg.reply_to_message.sticker:
         return await msg.reply_text("Reply to a sticker")
-
     st = msg.reply_to_message.sticker
     await msg.reply_text(
         f"⊹ <u>**sᴛɪᴄᴋᴇʀ ɪɴғᴏ**</u> ⊹\n"
         f"**⊚ sᴛɪᴄᴋᴇʀ ɪᴅ**: `{st.file_id}`\n\n"
         f"**⊚ sᴛɪᴄᴋᴇʀ ᴜɴɪǫᴜᴇ ɪᴅ**: `{st.file_unique_id}`"
     )
-
 
 # ------------------------------------------------------------------------------
 # Command: /kang – add sticker / image / gif / video to your personal pack
@@ -237,45 +228,35 @@ async def kang(client, message: Message):
 
     try:
         # ── Build the sticker object ───────────────────────────────────────────
-
         if r.sticker:
             s          = r.sticker
             used_emoji = s.emoji or emoji
-
             if s.is_animated:
                 await msg.edit("⚙️ Processing animated sticker...")
-                # Animated TGS — create_sticker() takes only (document, emoji)
                 sticker = await create_sticker(
                     await get_document_from_file_id(s.file_id),
                     used_emoji,
                 )
-
             elif s.is_video:
                 await msg.edit("⚙️ Processing video sticker...")
-                # Video .webm sticker — same signature
                 sticker = await create_sticker(
                     await get_document_from_file_id(s.file_id),
                     used_emoji,
                 )
-
             else:
-                # Static sticker
                 sticker = await create_sticker(
                     await get_document_from_file_id(s.file_id),
                     used_emoji,
                 )
-
         elif r.video or r.animation:
             await msg.edit("⬇️ Downloading video...")
             file    = await app.download_media(r)
             sticker = await make_video_sticker(client, file, emoji, msg, cid)
             os.remove(file)
-
         elif r.photo or r.document:
             await msg.edit("⬇️ Downloading media...")
             file  = await app.download_media(r)
             ftype = imghdr.what(file)
-
             if ftype in STATIC_TYPES:
                 file    = await resize_file_to_sticker_size(file)
                 sticker = await create_sticker(
@@ -284,10 +265,8 @@ async def kang(client, message: Message):
                 )
                 os.remove(file)
             else:
-                # GIF disguised as document
                 sticker = await make_video_sticker(client, file, emoji, msg, cid)
                 os.remove(file)
-
         else:
             return await msg.edit("Unsupported media type.")
 
@@ -301,7 +280,6 @@ async def kang(client, message: Message):
         while True:
             if limit > 50:
                 return await msg.delete()
-
             try:
                 stickerset = await get_sticker_set_by_name(client, packname)
             except StickersetInvalid:
@@ -347,6 +325,33 @@ async def kang(client, message: Message):
         print(format_exc())
         await msg.edit("Failed to kang sticker. Check logs for details.")
 
+# ------------------------------------------------------------------------------
+# Command: /geteffects – list all available Telegram message effect IDs (SUDO)
+# ------------------------------------------------------------------------------
+@app.on_message(filters.command("geteffects") & SUDOERS)
+async def get_effects(client, message: Message):
+    wait = await message.reply_text("⏳ Fetching available message effects...")
+    try:
+        result = await app.invoke(raw_functions.messages.GetAvailableEffects(hash=0))
+        if not result.effects:
+            return await wait.edit("No message effects found.")
+
+        text = "✨ **Available Message Effects:**\n\n"
+        for effect in result.effects:
+            emoticon = getattr(effect, "emoticon", "?")
+            text += f"{emoticon} → `{effect.id}`\n"
+
+        # Telegram message limit guard (4096 chars)
+        if len(text) > 4000:
+            chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+            await wait.edit(chunks[0])
+            for chunk in chunks[1:]:
+                await message.reply_text(chunk)
+        else:
+            await wait.edit(text)
+
+    except Exception as e:
+        await wait.edit(f"❌ Failed to fetch effects: `{e}`")
 
 # ------------------------------------------------------------------------------
 # Module metadata
@@ -358,4 +363,5 @@ __help__     = """
 🔻 /kang ➠ ᴀᴅᴅ sᴛɪᴄᴋᴇʀ/ɪᴍᴀɢᴇ/ɢɪꜰ/ᴠɪᴅᴇᴏ ᴛᴏ ʏᴏᴜʀ ᴘᴇʀsᴏɴᴀʟ ᴘᴀᴄᴋ
 🔻 /packkang ➠ ᴋᴀɴɢ ᴀɴ ᴇɴᴛɪʀᴇ sᴛɪᴄᴋᴇʀ ᴘᴀᴄᴋ
 🔻 /stickerid, /stid ➠ ɢᴇᴛ sᴛɪᴄᴋᴇʀ ɪᴅ & ᴜɴɪǫᴜᴇ ɪᴅ
+🔻 /geteffects ➠ [sᴜᴅᴏ] ʟɪsᴛ ᴀʟʟ ᴀᴠᴀɪʟᴀʙʟᴇ ᴍᴇssᴀɢᴇ ᴇꜰꜰᴇᴄᴛ ɪᴅs
 """
