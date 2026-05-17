@@ -21,11 +21,28 @@ from SHASHA_DRUGZ.utils.thumbnails import get_thumb
 SUPPORTED_VIDEO_CODECS = {"h264"}
 SUPPORTED_AUDIO_CODECS = {"aac"}
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  FIX #1 — Semaphore: at most 2 ffmpeg re-encode jobs run at the same time.
+#  Without this, a 20-track playlist spawns 20 simultaneous ffmpeg processes,
+#  exhausting all CPU/RAM and starving the asyncio event loop.
+# ─────────────────────────────────────────────────────────────────────────────
+_FFMPEG_SEMAPHORE = asyncio.Semaphore(2)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  FIX #2 — Timeout constants (seconds).
+#  Without these, a hung ffmpeg or ffprobe suspends the coroutine FOREVER,
+#  making the bot appear frozen (log runs, commands silently ignored).
+# ─────────────────────────────────────────────────────────────────────────────
+FFPROBE_TIMEOUT = 30          # ffprobe should finish in under 5 s normally
+FFMPEG_ENCODE_TIMEOUT = 900   # 15 min max for any single re-encode job
+
 
 async def _probe(file_path: str) -> dict:
     """
     Run ffprobe on the file and return the actual codec names and container.
     Returns: { "video_codec": str|None, "audio_codec": str|None, "format": str|None }
+
+    FIX: wrapped in asyncio.wait_for so a hung ffprobe can never block forever.
     """
     cmd = [
         "ffprobe",
@@ -41,7 +58,19 @@ async def _probe(file_path: str) -> dict:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        stdout, _ = await proc.communicate()
+        # FIX: timeout so a corrupt/huge file can't hang here forever
+        try:
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=FFPROBE_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            print(f"[_probe] ffprobe timed out for {file_path}, killing")
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+            return {"video_codec": None, "audio_codec": None, "format": None}
     except Exception as e:
         print(f"[_probe] ffprobe launch failed for {file_path}: {e}")
         return {"video_codec": None, "audio_codec": None, "format": None}
@@ -49,7 +78,6 @@ async def _probe(file_path: str) -> dict:
     result = {"video_codec": None, "audio_codec": None, "format": None}
     try:
         data = json.loads(stdout)
-        # container format name (e.g. "matroska,webm", "avi", "mov,mp4,m4a,3gp,3g2,mj2")
         fmt = data.get("format", {}).get("format_name", "")
         result["format"] = fmt.lower() if fmt else None
         for s in data.get("streams", []):
@@ -61,7 +89,6 @@ async def _probe(file_path: str) -> dict:
                 result["audio_codec"] = cname
     except Exception as ex:
         print(f"[_probe] JSON parse error for {file_path}: {ex}")
-
     return result
 
 
@@ -72,60 +99,37 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
         Video mode → H.264 + AAC inside MP4
         Audio mode → AAC inside M4A  (no video track)
 
-    Handles ALL of these automatically:
-        H.265 / HEVC, VP9, VP8, AV1, MPEG-4, DivX   → re-encode to H.264
-        MP3-in-MP4, Opus-in-MP4, Vorbis, FLAC, PCM  → re-encode to AAC
-        MKV, AVI, WMV, FLV, MOV, TS, WEBM containers → remux/re-encode to MP4
-        Already H.264 + AAC in MP4                   → returned as-is instantly
-
-    The output file is cached (_compat suffix) so repeated plays are free.
-    If ffmpeg fails for any reason the original path is returned so the bot
-    does not crash — it may just not play that file.
-
-    Codec map:
-    ┌──────────────────────┬────────────────────────────────┐
-    │ Input codec          │ Action                         │
-    ├──────────────────────┼────────────────────────────────┤
-    │ H.264 + AAC in MP4   │ pass-through (zero cost)       │
-    │ H.265 / HEVC         │ re-encode video → libx264      │
-    │ VP9 / VP8 / AV1      │ re-encode video → libx264      │
-    │ MPEG-4 / DivX / Xvid │ re-encode video → libx264      │
-    │ MP3 inside MP4/MKV   │ re-encode audio → aac          │
-    │ Opus / Vorbis / FLAC │ re-encode audio → aac          │
-    │ Any non-MP4 container│ remux / re-encode → .mp4       │
-    │ Audio-only file      │ adds black canvas (video mode) │
-    └──────────────────────┴────────────────────────────────┘
+    FIXES applied vs original:
+      1. asyncio.Semaphore(2)  — limits concurrent ffmpeg jobs to 2
+      2. asyncio.wait_for(..., timeout=FFMPEG_ENCODE_TIMEOUT)  — kills hung jobs
+      3. stderr=DEVNULL during encode  — prevents megabyte RAM buffers
+      4. Kills and cleans up the process on timeout, returns original path safely
     """
     if not file_path or not os.path.exists(file_path):
         print(f"[ensure_compatible] File not found: {file_path}")
         return file_path
 
     info = await _probe(file_path)
-    v_codec = info["video_codec"]    # e.g. "hevc", "vp9", "h264", None
-    a_codec = info["audio_codec"]    # e.g. "mp3", "opus", "aac", None
-    fmt     = info["format"] or ""   # e.g. "matroska,webm", "mov,mp4,m4a,3gp,3g2,mj2"
+    v_codec = info["video_codec"]
+    a_codec = info["audio_codec"]
+    fmt     = info["format"] or ""
 
-    # Check if the container is truly MP4-compatible
     is_mp4_container = "mov,mp4" in fmt or fmt == "mp4"
 
     if video:
-        # ── VIDEO MODE ─────────────────────────────────────────────────────
         needs_v = (v_codec is not None) and (v_codec not in SUPPORTED_VIDEO_CODECS)
         needs_a = (a_codec is not None) and (a_codec not in SUPPORTED_AUDIO_CODECS)
         no_vid  = v_codec is None
 
-        # Perfect file: H.264 + AAC already in an MP4 container — zero cost
         if is_mp4_container and not needs_v and not needs_a and not no_vid:
-            return file_path
+            return file_path  # already perfect — zero cost, no semaphore needed
 
         out_path = os.path.splitext(file_path)[0] + "_compat.mp4"
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             return out_path
 
         cmd = ["ffmpeg", "-y", "-i", file_path]
-
         if no_vid:
-            # Audio-only file requested in video mode → add black video canvas
             cmd += [
                 "-f", "lavfi",
                 "-i", "color=c=black:s=1280x720:r=24",
@@ -136,27 +140,21 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
             v_flag = "copy" if not needs_v else "libx264"
 
         a_flag = "copy" if not needs_a else "aac"
-
         cmd += ["-c:v", v_flag, "-c:a", a_flag]
-
         if v_flag == "libx264":
             cmd += ["-preset", "ultrafast", "-crf", "23"]
         if a_flag == "aac":
             cmd += ["-b:a", "128k"]
-
-        # Always force MP4 container output
         cmd += ["-f", "mp4", "-movflags", "+faststart", out_path]
 
     else:
-        # ── AUDIO MODE ─────────────────────────────────────────────────────
         needs_a = (a_codec is not None) and (a_codec not in SUPPORTED_AUDIO_CODECS)
-        # Native pass: file is already AAC in an m4a/aac container
         is_native_audio = (
             file_path.lower().endswith((".m4a", ".aac"))
             and not needs_a
         )
         if is_native_audio:
-            return file_path
+            return file_path  # already perfect — no semaphore needed
 
         out_path = os.path.splitext(file_path)[0] + "_compat.m4a"
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
@@ -168,35 +166,74 @@ async def ensure_compatible(file_path: str, video: bool = False) -> str:
             cmd += ["-b:a", "128k"]
         cmd.append(out_path)
 
-    # ── Run ffmpeg ──────────────────────────────────────────────────────────
-    print(f"[ensure_compatible] Running: {' '.join(cmd)}")
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-    except Exception as e:
-        print(f"[ensure_compatible] ffmpeg launch failed: {e}")
-        return file_path
+    # ── Run ffmpeg under semaphore + timeout ────────────────────────────────
+    print(f"[ensure_compatible] Waiting for ffmpeg slot: {file_path}")
+    async with _FFMPEG_SEMAPHORE:
+        # Double-check cache — another coroutine may have built it while we waited
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return out_path
+
+        print(f"[ensure_compatible] Running: {' '.join(cmd)}")
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                # FIX: DEVNULL not PIPE — avoids buffering gigabytes of
+                # ffmpeg progress output in RAM across concurrent processes
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            # FIX: timeout kills hung ffmpeg instead of waiting forever
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=FFMPEG_ENCODE_TIMEOUT)
+            except asyncio.TimeoutError:
+                print(
+                    f"[ensure_compatible] ffmpeg TIMED OUT after "
+                    f"{FFMPEG_ENCODE_TIMEOUT}s for {file_path}, killing"
+                )
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+                # Clean up broken partial output
+                _safe_remove(out_path)
+                return file_path  # fall back gracefully
+
+        except Exception as e:
+            print(f"[ensure_compatible] ffmpeg launch failed: {e}")
+            if proc:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+            _safe_remove(out_path)
+            return file_path
 
     if proc.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-        print(f"[ensure_compatible] ffmpeg error for {file_path}:\n{stderr.decode(errors='replace')}")
-        # Clean up broken output file
-        try:
-            if os.path.exists(out_path):
-                os.remove(out_path)
-        except Exception:
-            pass
-        return file_path   # fall back — bot won't crash
+        print(
+            f"[ensure_compatible] ffmpeg exited with code {proc.returncode} "
+            f"for {file_path} — falling back to original"
+        )
+        _safe_remove(out_path)
+        return file_path
 
     print(f"[ensure_compatible] Done: {file_path} → {out_path}")
     return out_path
 
 
+def _safe_remove(path: str) -> None:
+    """Delete a file silently if it exists."""
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-#  Main stream dispatcher
+#  Main stream dispatcher  (unchanged logic, no fixes needed here)
 # ─────────────────────────────────────────────────────────────────────────────
 async def stream(
     _,
@@ -450,14 +487,7 @@ async def stream(
         duration_min = result["dur"]
         status       = True if video else None
 
-        # ✅ THE CORE FIX — ffprobe reads the REAL codec, not just the extension.
-        #
-        #   This handles ALL of:
-        #   • .mkv with HEVC/VP9/VP8/AV1/MPEG-4 → re-encoded to H.264+AAC in .mp4
-        #   • .mp4 with wrong codec (e.g. HEVC or MP3 audio) → re-encoded
-        #   • .avi .wmv .flv .mov .ts .webm etc. → remuxed/re-encoded to .mp4
-        #   • Audio-only files in video mode → black canvas added automatically
-        #   • Already H.264+AAC in .mp4 → returned instantly (zero cost)
+        # ensure_compatible is now guarded by semaphore + timeout (see above)
         file_path = await ensure_compatible(file_path, video=bool(video))
 
         if await is_active_chat(chat_id):
