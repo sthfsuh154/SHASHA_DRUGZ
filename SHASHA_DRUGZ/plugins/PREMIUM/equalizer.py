@@ -110,11 +110,9 @@ async def apply_eq(chat_id: int, filter_string: str):
     final_filter = BASE_AUDIO_ENGINE
     if filter_string:
         final_filter = f"{BASE_AUDIO_ENGINE},{filter_string}"
-
     current = call_py.get_call(chat_id)
     if not current:
         return False
-
     await call_py.change_stream(
         chat_id,
         AudioPiped(
@@ -202,11 +200,10 @@ def stop_all_loops(chat_id: int):
 def main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎚 ᴘʀᴇsᴇᴛs", callback_data="eq_presets")],
-        #[InlineKeyboardButton("🎛 10‑Band EQ", callback_data="eq_multiband")],
-        #[InlineKeyboardButton("🎧 DJ Mode", callback_data="eq_dj")],
         [InlineKeyboardButton("🔊 ʙᴀss +", callback_data="eq_bass_plus"),
          InlineKeyboardButton("🔉 ʙᴀss -", callback_data="eq_bass_minus")],
-        #[InlineKeyboardButton("🔄 Auto BPM", callback_data="eq_toggle_autobpm"),
+        [InlineKeyboardButton("🔈 ᴠᴏʟ -", callback_data="eq_vol_minus"),
+         InlineKeyboardButton("🔊 ᴠᴏʟ +", callback_data="eq_vol_plus")],
         [InlineKeyboardButton("🌀 ᴅʏɴᴀᴍɪᴄ ᴇǫ", callback_data="eq_toggle_dynamic")],
         [InlineKeyboardButton("🎛 ʀᴇsᴇᴛ ᴇǫ", callback_data="eq_reset")]
     ])
@@ -228,20 +225,17 @@ def preset_menu():
 async def get_status_text(chat_id: int):
     filter_string, auto_bpm, dynamic_eq = await get_group_eq(chat_id)
     comp = parse_filter(filter_string)
-
-    bass = comp.get("bass", "0")
-    treble = comp.get("treble", "0")
+    bass = comp.get("bass", "g=0")
+    treble = comp.get("treble", "g=0")
     volume = comp.get("volume", "1.0")
     try:
         vol_percent = int(float(volume) * 100)
     except:
         vol_percent = 100
-
     effects = []
     for effect in ["echo", "reverb", "aecho", "apulsator", "pan"]:
         if effect in comp:
             effects.append(effect)
-
     status = f"<blockquote>**🎛 sʜᴀsʜᴀ ᴘʀᴇᴍɪᴜᴍ ᴇǫᴜᴀʟɪᴢᴇʀ**</blockquote>\n"
     status += f"<blockquote>🔊 **ʙᴀss:** `{bass}`\n"
     status += f"🎵 **ᴛʀᴇʙʟᴇ:** `{treble}`\n"
@@ -259,6 +253,7 @@ async def equalizer_cmd(_, message):
     status = await get_status_text(chat_id)
     await message.reply(status, reply_markup=main_menu())
 
+
 @app.on_message(filters.command("resetequalizer") & filters.group)
 async def reset_eq(_, message):
     try:
@@ -268,81 +263,80 @@ async def reset_eq(_, message):
     except:
         await message.reply("<blockquote>❌ ᴏɴʟʏ ɢʀᴏᴜᴘ ᴀᴅᴍɪɴs ᴄᴀɴ ʀᴇsᴇᴛ ᴛʜᴇ ᴇǫᴜᴀʟɪᴢᴇʀ.</blockquote>")
         return
-
     chat_id = message.chat.id
     stop_all_loops(chat_id)
     await apply_eq(chat_id, "")
     await GROUP_EQ_DB.delete_one({"chat_id": chat_id})
     await message.reply("<blockquote>✅ ᴇǫᴜᴀʟɪᴢᴇʀ ғᴜʟʟʏ ʀᴇsᴇᴛ ғᴏʀ ᴛʜɪs ɢʀᴏᴜᴘ.</blockquote>")
 
+
 @app.on_message(filters.command(["vol", "volume"]) & filters.group)
 async def volume_cmd(_, message):
     if len(message.command) < 2:
         return await message.reply("<blockquote>ᴜsᴀɢᴇ: `/vol 150` (0‑200)</blockquote>")
-
     try:
         vol = int(message.command[1])
         if vol < MIN_VOL or vol > MAX_VOL:
             raise ValueError
     except:
-        return await message.reply(f"ᴠᴏʟᴜᴍᴇ ᴍᴜsᴛ ʙᴇ ᴀɴ ɴᴜᴍʙᴇʀ ʙᴇᴛᴡᴇᴇɴ {MIN_VOL} ᴀɴᴅ {MAX_VOL}.")
-
+        return await message.reply(
+            f"<blockquote>❌ ᴠᴏʟᴜᴍᴇ ᴍᴜsᴛ ʙᴇ ᴀ ɴᴜᴍʙᴇʀ ʙᴇᴛᴡᴇᴇɴ {MIN_VOL} ᴀɴᴅ {MAX_VOL}.</blockquote>"
+        )
     chat_id = message.chat.id
     current_filter, auto_bpm, dynamic_eq = await get_group_eq(chat_id)
     comp = parse_filter(current_filter)
     gain = vol / 100.0
     comp["volume"] = str(gain)
     new_filter = build_filter(comp)
-    await apply_eq(chat_id, new_filter)
+    ok = await apply_eq(chat_id, new_filter)
+    if not ok:
+        return await message.reply("<blockquote>❌ ɴᴏ ᴀᴄᴛɪᴠᴇ ᴠᴏɪᴄᴇ ᴄᴀʟʟ ғᴏᴜɴᴅ ɪɴ ᴛʜɪs ɢʀᴏᴜᴘ.</blockquote>")
     await message.reply(f"<blockquote>🔊 ᴠᴏʟᴜᴍᴇ sᴇᴛ ᴛᴏ **{vol}%**</blockquote>")
+
 
 @app.on_message(filters.command("bass") & filters.group)
 async def bass_cmd(_, message):
     chat_id = message.chat.id
     current_filter, auto_bpm, dynamic_eq = await get_group_eq(chat_id)
     comp = parse_filter(current_filter)
-
     if len(message.command) == 1:
         comp["bass"] = "g=8"
         new_filter = build_filter(comp)
         await apply_eq(chat_id, new_filter)
         return await message.reply("<blockquote>🔊 ʙᴀss ʙᴏᴏsᴛᴇᴅ (ᴅᴇғᴀᴜʟᴛ ʟᴇᴠᴇʟ 8)</blockquote>")
-
     try:
         gain = int(message.command[1])
         if gain < 0 or gain > 30:
             raise ValueError
     except:
         return await message.reply("<blockquote>ʙᴀss ɢᴀɪɴ ᴍᴜsᴛ ʙᴇ 0‑30 (e.g., `/bass 12`)</blockquote>")
-
     comp["bass"] = f"g={gain}"
     new_filter = build_filter(comp)
     await apply_eq(chat_id, new_filter)
     await message.reply(f"<blockquote>🔊 ʙᴀss sᴇᴛ ᴛᴏ **{gain}**</blockquote>")
+
 
 @app.on_message(filters.command("treble") & filters.group)
 async def treble_cmd(_, message):
     chat_id = message.chat.id
     current_filter, auto_bpm, dynamic_eq = await get_group_eq(chat_id)
     comp = parse_filter(current_filter)
-
     if len(message.command) == 1:
         comp["treble"] = "g=6"
         new_filter = build_filter(comp)
         await apply_eq(chat_id, new_filter)
         return await message.reply("<blockquote>🎵 ᴛʀᴇʙʟᴇ ʙᴏᴏsᴛᴇᴅ (ᴅᴇғᴀᴜʟᴛ ʟᴇᴠᴇʟ 6)</blockquote>")
-
     try:
         gain = int(message.command[1])
         if gain < 0 or gain > 20:
             raise ValueError
     except:
         return await message.reply("<blockquote>ᴛʀᴇʙʟᴇ ɢᴀɪɴ ᴍᴜsᴛ ʙᴇ 0‑20 (e.g., `/treble 8`)</blockquote>")
-
     comp["treble"] = f"g={gain}"
     new_filter = build_filter(comp)
     await apply_eq(chat_id, new_filter)
     await message.reply(f"<blockquote>🎵 ᴛʀᴇʙʟᴇ sᴇᴛ ᴛᴏ **{gain}**</blockquote>")
+
 
 @app.on_message(filters.command(list(EQ_PRESETS.keys())) & filters.group)
 async def preset_cmd(_, message):
@@ -355,13 +349,13 @@ async def preset_cmd(_, message):
         await apply_eq(chat_id, new_filter)
         await message.reply(f"<blockquote>✅ ᴘʀᴇsᴇᴛ **{cmd.capitalize()}** ᴀᴘᴘʟɪᴇᴅ.</blockquote>")
 
+
 @app.on_message(filters.command("autobpm") & filters.group)
 async def autobpm_toggle_cmd(_, message):
     chat_id = message.chat.id
     current_filter, auto_bpm, dynamic_eq = await get_group_eq(chat_id)
     new_state = not auto_bpm
     await save_group_eq(chat_id, current_filter, new_state, dynamic_eq)
-
     if new_state:
         start_auto_bpm(chat_id)
         await message.reply("✅ Auto BPM mode **enabled** (simulated).")
@@ -369,13 +363,13 @@ async def autobpm_toggle_cmd(_, message):
         stop_auto_bpm(chat_id)
         await message.reply("❌ Auto BPM mode **disabled**.")
 
+
 @app.on_message(filters.command("dynamiceq") & filters.group)
 async def dynamiceq_toggle_cmd(_, message):
     chat_id = message.chat.id
     current_filter, auto_bpm, dynamic_eq = await get_group_eq(chat_id)
     new_state = not dynamic_eq
     await save_group_eq(chat_id, current_filter, auto_bpm, new_state)
-
     if new_state:
         start_dynamic(chat_id)
         await message.reply("<blockquote>✅ ᴅʏɴᴀᴍɪᴄ ᴇǫ ᴍᴏᴅᴇ **ᴇɴᴀʙʟᴇᴅ** (ᴄʏᴄʟɪɴɢ ᴘʀᴇsᴇᴛs).</blockquote>")
@@ -401,7 +395,7 @@ async def eq_callback(_, query: CallbackQuery):
     if data == "reset":
         stop_all_loops(chat_id)
         await apply_eq(chat_id, "")
-        await query.answer("<blockquote>ᴇǫ ʀᴇsᴇᴛ ✅</blockquote>")
+        await query.answer("ᴇǫ ʀᴇsᴇᴛ ✅")
         status = await get_status_text(chat_id)
         await query.message.edit_text(status, reply_markup=main_menu())
         return
@@ -436,6 +430,38 @@ async def eq_callback(_, query: CallbackQuery):
         new_filter = build_filter(comp)
         await apply_eq(chat_id, new_filter)
         await query.answer(f"Bass reduced to {new_val}")
+        status = await get_status_text(chat_id)
+        await query.message.edit_text(status, reply_markup=main_menu())
+        return
+
+    if data == "vol_plus":
+        current_filter, _, _ = await get_group_eq(chat_id)
+        comp = parse_filter(current_filter)
+        try:
+            current_vol = int(float(comp.get("volume", "1.0")) * 100)
+        except:
+            current_vol = 100
+        new_vol = min(current_vol + 10, MAX_VOL)
+        comp["volume"] = str(new_vol / 100.0)
+        new_filter = build_filter(comp)
+        await apply_eq(chat_id, new_filter)
+        await query.answer(f"Volume increased to {new_vol}%")
+        status = await get_status_text(chat_id)
+        await query.message.edit_text(status, reply_markup=main_menu())
+        return
+
+    if data == "vol_minus":
+        current_filter, _, _ = await get_group_eq(chat_id)
+        comp = parse_filter(current_filter)
+        try:
+            current_vol = int(float(comp.get("volume", "1.0")) * 100)
+        except:
+            current_vol = 100
+        new_vol = max(current_vol - 10, MIN_VOL)
+        comp["volume"] = str(new_vol / 100.0)
+        new_filter = build_filter(comp)
+        await apply_eq(chat_id, new_filter)
+        await query.answer(f"Volume decreased to {new_vol}%")
         status = await get_status_text(chat_id)
         await query.message.edit_text(status, reply_markup=main_menu())
         return
@@ -501,7 +527,7 @@ async def eq_callback(_, query: CallbackQuery):
         comp = parse_filter(preset_filter)
         new_filter = build_filter(comp)
         await apply_eq(chat_id, new_filter)
-        await query.answer(f"{data.replace('_',' ').title()} Applied ✅")
+        await query.answer(f"{data.replace('_', ' ').title()} Applied ✅")
         status = await get_status_text(chat_id)
         await query.message.edit_text(status, reply_markup=main_menu())
         return
@@ -512,10 +538,9 @@ async def cleanup_on_call_end(_, chat_id: int):
 
 # Register the cleanup function on all available PyTgCalls clients
 for client in [call_py.one, call_py.two, call_py.three, call_py.four, call_py.five]:
-    if client:  # client may be None if the corresponding string is missing
+    if client:
         client.on_kicked()(cleanup_on_call_end)
         client.on_closed_voice_chat()(cleanup_on_call_end)
-
 
 __menu__ = "CMD_MUSIC"
 __mod_name__ = "H_B_41"
