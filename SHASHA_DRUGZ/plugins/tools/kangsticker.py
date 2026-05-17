@@ -20,6 +20,7 @@ from pyrogram.errors import (
 
 from SHASHA_DRUGZ import app
 from SHASHA_DRUGZ.misc import SUDOERS
+from SHASHA_DRUGZ.utils.database import get_assistant   # ← userbot client
 from config import BOT_USERNAME
 from SHASHA_DRUGZ.utils.errors import capture_err
 from SHASHA_DRUGZ.utils.files import (
@@ -38,7 +39,7 @@ from SHASHA_DRUGZ.utils.stickerset import (
 # Constants
 # ------------------------------------------------------------------------------
 MAX_STICKERS = 120
-STATIC_TYPES = ["jpeg", "png", "webp"]
+STATIC_TYPES  = ["jpeg", "png", "webp"]
 
 # ------------------------------------------------------------------------------
 # Helpers
@@ -326,32 +327,91 @@ async def kang(client, message: Message):
         await msg.edit("Failed to kang sticker. Check logs for details.")
 
 # ------------------------------------------------------------------------------
-# Command: /geteffects – list all available Telegram message effect IDs (SUDO)
+# Command: /geteffects         — list ALL available Telegram message effect IDs
+# Command: /geteffects <emoji> — look up a SPECIFIC emoji effect ID
+#
+# WHY USERBOT: Telegram blocks bots from calling messages.GetAvailableEffects
+# with BOT_METHOD_INVALID. The assistant userbot (user account) can call it.
 # ------------------------------------------------------------------------------
 @app.on_message(filters.command("geteffects") & SUDOERS)
 async def get_effects(client, message: Message):
-    wait = await message.reply_text("⏳ Fetching available message effects...")
+    wait = await message.reply_text("⏳ Fetching effects via assistant...")
+
+    # ── Get the userbot client ────────────────────────────────────────────────
     try:
-        result = await app.invoke(raw_functions.messages.GetAvailableEffects(hash=0))
-        if not result.effects:
-            return await wait.edit("No message effects found.")
-
-        text = "✨ **Available Message Effects:**\n\n"
-        for effect in result.effects:
-            emoticon = getattr(effect, "emoticon", "?")
-            text += f"{emoticon} → `{effect.id}`\n"
-
-        # Telegram message limit guard (4096 chars)
-        if len(text) > 4000:
-            chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
-            await wait.edit(chunks[0])
-            for chunk in chunks[1:]:
-                await message.reply_text(chunk)
-        else:
-            await wait.edit(text)
-
+        userbot = await get_assistant(message.chat.id)
     except Exception as e:
-        await wait.edit(f"❌ Failed to fetch effects: `{e}`")
+        return await wait.edit(
+            f"❌ Could not get assistant userbot: `{e}`\n"
+            f"Make sure the assistant is in this group."
+        )
+
+    # ── Fetch effects from Telegram via userbot ───────────────────────────────
+    try:
+        result = await userbot.invoke(
+            raw_functions.messages.GetAvailableEffects(hash=0)
+        )
+    except Exception as e:
+        return await wait.edit(f"❌ Failed to fetch effects: `{e}`")
+
+    if not result.effects:
+        return await wait.edit("No message effects found.")
+
+    # Build a clean emoji → id mapping
+    effects_map = {}
+    for effect in result.effects:
+        emoticon = getattr(effect, "emoticon", None) or "?"
+        effects_map[emoticon] = effect.id
+
+    # ── /geteffects <emoji>  — search for a specific emoji ───────────────────
+    if len(message.command) >= 2:
+        query = message.text.split(maxsplit=1)[1].strip()
+        if query in effects_map:
+            eid = effects_map[query]
+            return await wait.edit(
+                f"✨ **Effect ID for** {query}\n\n"
+                f"`{eid}`"
+            )
+        else:
+            # Try partial / case-insensitive match on emoticon string
+            matches = [
+                (emo, eid)
+                for emo, eid in effects_map.items()
+                if query.lower() in emo.lower()
+            ]
+            if matches:
+                lines = "\n".join(f"{emo} → `{eid}`" for emo, eid in matches)
+                return await wait.edit(
+                    f"✨ **Partial matches for** `{query}`:\n\n{lines}"
+                )
+            else:
+                return await wait.edit(
+                    f"❌ No effect found for `{query}`.\n\n"
+                    f"Use `/geteffects` (no argument) to see all available effects."
+                )
+
+    # ── /geteffects — list ALL effects ───────────────────────────────────────
+    lines = [f"{emo} → `{eid}`" for emo, eid in effects_map.items()]
+    header = f"✨ **Available Message Effects** ({len(lines)} total):\n\n"
+    full   = header + "\n".join(lines)
+
+    # Telegram 4096-char limit guard — split into chunks if needed
+    if len(full) <= 4000:
+        await wait.edit(full)
+    else:
+        chunks = []
+        current = header
+        for line in lines:
+            if len(current) + len(line) + 1 > 4000:
+                chunks.append(current)
+                current = ""
+            current += line + "\n"
+        if current:
+            chunks.append(current)
+
+        await wait.edit(chunks[0])
+        for chunk in chunks[1:]:
+            await message.reply_text(chunk)
 
 # ------------------------------------------------------------------------------
 # Module metadata
@@ -363,5 +423,6 @@ __help__     = """
 🔻 /kang ➠ ᴀᴅᴅ sᴛɪᴄᴋᴇʀ/ɪᴍᴀɢᴇ/ɢɪꜰ/ᴠɪᴅᴇᴏ ᴛᴏ ʏᴏᴜʀ ᴘᴇʀsᴏɴᴀʟ ᴘᴀᴄᴋ
 🔻 /packkang ➠ ᴋᴀɴɢ ᴀɴ ᴇɴᴛɪʀᴇ sᴛɪᴄᴋᴇʀ ᴘᴀᴄᴋ
 🔻 /stickerid, /stid ➠ ɢᴇᴛ sᴛɪᴄᴋᴇʀ ɪᴅ & ᴜɴɪǫᴜᴇ ɪᴅ
-🔻 /geteffects ➠ [sᴜᴅᴏ] ʟɪsᴛ ᴀʟʟ ᴀᴠᴀɪʟᴀʙʟᴇ ᴍᴇssᴀɢᴇ ᴇꜰꜰᴇᴄᴛ ɪᴅs
+🔻 /geteffects ➠ [sᴜᴅᴏ] ʟɪsᴛ ᴀʟʟ ᴀᴠᴀɪʟᴀʙʟᴇ ᴍᴇssᴀɢᴇ ᴇꜰꜰᴇᴄᴛ ɪᴅs ᴠɪᴀ ᴀssɪsᴛᴀɴᴛ
+🔻 /geteffects <emoji> ➠ [sᴜᴅᴏ] ɢᴇᴛ ᴇꜰꜰᴇᴄᴛ ɪᴅ ꜰᴏʀ ᴀ sᴘᴇᴄɪꜰɪᴄ ᴇᴍᴏᴊɪ
 """
