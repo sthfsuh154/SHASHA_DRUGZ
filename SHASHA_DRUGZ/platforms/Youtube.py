@@ -1,7 +1,16 @@
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║  Youtube.py — SHASHA_DRUGZ  ·  FINAL MERGED VERSION + LIVE STREAM SUPPORT  ║
 # ║                                                                              ║
-# ║  Download chain : API → cookies.txt → auto-generated browser cookies        ║
+# ║  Download chain : API (multi-endpoint fallback) → cookies.txt               ║
+# ║                   → auto-generated browser cookies                           ║
+# ║                                                                              ║
+# ║  Multi-API      : Primary API_URL/API_KEY + unlimited extra endpoints        ║
+# ║    Config       : EXTRA_API_URLS  = "url1,url2,url3"                        ║
+# ║                   EXTRA_API_KEYS  = "key1,key2,key3"  (matched by position) ║
+# ║    Fallback     : tries each endpoint in order; moves to next on failure     ║
+# ║    Keys         : optional — URLs without matching keys use empty string     ║
+# ║    Single-API   : set only API_URL/API_KEY (original behaviour preserved)   ║
+# ║                                                                              ║
 # ║  On bot/auth    : cookies wiped & regenerated INFINITELY until success      ║
 # ║  No email/password used anywhere                                             ║
 # ║                                                                              ║
@@ -29,54 +38,124 @@ import time
 import datetime
 import logging
 from typing import Union, Optional, Tuple
+
 import aiohttp
 import yt_dlp
 from playwright.async_api import async_playwright
 from pyrogram.enums import MessageEntityType
 from pyrogram.types import Message
+
 try:
     from youtubesearchpython.__future__ import VideosSearch
 except ImportError:
     from py_yt import VideosSearch
+
 from SHASHA_DRUGZ import app, LOGGER
 from SHASHA_DRUGZ.utils.formatters import time_to_seconds
 from config import LOG_GROUP_ID
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ENVIRONMENT / CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
-API_URL  = os.getenv("API_URL", "https://shrutibots.site").rstrip("/") #,
-API_KEY  = os.getenv("API_KEY", "")
+
+# ── Primary API endpoint ──────────────────────────────────────────────────────
+API_URL = os.getenv("API_URL", "https://shrutibots.site").rstrip("/")
+API_KEY = os.getenv("API_KEY", "")
+
+# ── Extra / fallback API endpoints ───────────────────────────────────────────
+# Add as many fallback endpoints as you want using comma-separated values.
+#
+# Examples (set in your .env or environment):
+#   EXTRA_API_URLS = "https://tgapi.xbitcode.com,https://my-backup-api.com"
+#   EXTRA_API_KEYS = "xbit_OMf5EuaAUW7rc_iabcXaihWgO-fyzB9L,backup_key_here"
+#
+# Rules:
+#   • Keys are matched to URLs by position (index 0 key → index 0 URL, etc.)
+#   • If a URL has no matching key (fewer keys than URLs), an empty key is used
+#   • If you only want one URL (no extras), just leave EXTRA_API_URLS empty
+#   • Duplicates of API_URL are silently skipped
+#   • Works fine with zero extra URLs — same behaviour as before
+#
+EXTRA_API_URLS = os.getenv("EXTRA_API_URLS", "https://tgapi.xbitcode.com")
+EXTRA_API_KEYS = os.getenv("EXTRA_API_KEYS", "xbit_OMf5EuaAUW7rc_iabcXaihWgO-fyzB9L")
+
+
+def _build_api_endpoints() -> list:
+    """
+    Build the ordered list of (url, key) tuples used for API fallback.
+
+    Order:  primary (API_URL / API_KEY)  →  extras (EXTRA_API_URLS / EXTRA_API_KEYS)
+    Returns an empty list when no URLs are configured.
+    """
+    endpoints: list = []
+
+    # 1. Primary endpoint
+    primary = API_URL.rstrip("/") if API_URL else ""
+    if primary:
+        endpoints.append((primary, API_KEY or ""))
+
+    # 2. Extra endpoints
+    if EXTRA_API_URLS:
+        raw_urls = [u.strip().rstrip("/") for u in EXTRA_API_URLS.split(",")]
+        raw_keys = [k.strip() for k in (EXTRA_API_KEYS or "").split(",")]
+
+        for idx, url in enumerate(raw_urls):
+            if not url:
+                continue
+            key = raw_keys[idx] if idx < len(raw_keys) else ""
+            # Skip exact duplicates of an already-added endpoint
+            if not any(ep[0] == url for ep in endpoints):
+                endpoints.append((url, key))
+
+    return endpoints
+
+
+# Built once at import time; re-call _build_api_endpoints() if you hot-reload config.
+API_ENDPOINTS: list = _build_api_endpoints()
+
+# ── Other settings ────────────────────────────────────────────────────────────
 PLAY_URL = os.getenv(
     "PLAY_URL", "https://youtu.be/ip8o5hDFLhI?si=jCdWYdBAEulr2b49")
+
 ENABLE_YT_COOKIES    = os.getenv("ENABLE_YT_COOKIES",  "true").lower() == "true"
 AUTO_REFRESH_COOKIES = True
 YTDLP_PROXIES        = os.getenv("YTDLP_PROXIES",      "")
 PLAYWRIGHT_PROXIES   = os.getenv("PLAYWRIGHT_PROXIES",  "")
+
 # How often (seconds) the IP-quality background watcher polls
 IP_POLL_INTERVAL = int(os.getenv("IP_POLL_INTERVAL", "60"))
-# API retries (hard cap — API should be reliable)
+
+# API retries per endpoint (hard cap — API should be reliable)
 MAX_API_RETRIES   = 3
+
 # Give up only after this many *consecutive* non-auth yt-dlp errors
 MAX_NON_AUTH_ERRS = 5
+
 # Progress bar update throttle (seconds) — avoids Telegram flood-wait
 PROGRESS_UPDATE_INTERVAL = 3
+
 # ── Directories ───────────────────────────────────────────────────────────────
 DOWNLOAD_DIR           = os.path.join(os.getcwd(), "downloads")
 COOKIES_DIR            = os.path.join(os.getcwd(), "cookies")
 PLAYWRIGHT_PROFILE_DIR = os.path.join(os.getcwd(), "playwright_profile")
 YT_CACHE_DIR           = os.path.join(os.getcwd(), "ytcache")
+
 for _d in (DOWNLOAD_DIR, COOKIES_DIR, PLAYWRIGHT_PROFILE_DIR, YT_CACHE_DIR):
     os.makedirs(_d, exist_ok=True)
+
 # Single cookie file — only ONE kept at a time
 COOKIE_FILE = os.path.join(COOKIES_DIR, "youtube_cookies.txt")
+
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(3)
 _COOKIE_LOCK       = asyncio.Lock()   # only ONE generation at a time
+
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 ]
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  BLOCKED ORG KEYWORDS  (Amazon / AWS only)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -84,16 +163,22 @@ BLOCKED_ORG_KEYWORDS = [
     "amazon", "amazon.com", "amazon technologies", "amazon data services",
     "amazon cloudfront", "amazon web services", "aws", "as16509", "as14618",
 ]
+
 _IS_BLOCKED_IP:   bool = False
 _CURRENT_IP_INFO: dict = {}
 _GOOD_IP_EVENT         = None   # asyncio.Event — lazy-init inside running loop
+
+
 def _good_ip_event() -> asyncio.Event:
     global _GOOD_IP_EVENT
     if _GOOD_IP_EVENT is None:
         _GOOD_IP_EVENT = asyncio.Event()
     return _GOOD_IP_EVENT
+
+
 def is_blocked_ip() -> bool:
     return _IS_BLOCKED_IP
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  LOGGER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -109,16 +194,24 @@ def get_logger(name: str):
             log.addHandler(h)
         log.setLevel(logging.INFO)
         return log
+
+
 logger = get_logger("SHASHA_DRUGZ/platforms/Youtube.py")
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  PROXY HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 def _parse_proxy_list(proxy_env: str) -> list:
     return [p.strip() for p in proxy_env.split(",") if p.strip()]
+
+
 YTDLP_PROXY_POOL      = _parse_proxy_list(YTDLP_PROXIES)
 PLAYWRIGHT_PROXY_POOL = _parse_proxy_list(PLAYWRIGHT_PROXIES)
+
+
 def choose_random_proxy(pool: list) -> Optional[str]:
     return random.choice(pool) if pool else None
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  COOKIE CLEANUP
 # ══════════════════════════════════════════════════════════════════════════════
@@ -132,6 +225,7 @@ def clear_old_cookies():
         logger.warning("🧹 Old YouTube cookies removed")
     except Exception as e:
         logger.error(f"Failed to clear cookies: {e}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  LOG GROUP HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -146,6 +240,8 @@ async def send_to_log_group(text: str = None, file_obj=None):
             await app.send_message(chat_id=LOG_GROUP_ID, text=text)
     except Exception as e:
         logger.error(f"Failed to send to log group: {e}")
+
+
 async def send_cookie_file_to_log_group(reason: str = ""):
     if not os.path.exists(COOKIE_FILE):
         logger.warning("Cookie file missing — cannot send to log group.")
@@ -173,6 +269,7 @@ async def send_cookie_file_to_log_group(reason: str = ""):
                 await send_to_log_group(text=caption, file_obj=f)
         except Exception as e2:
             logger.error(f"Failed to send cookie file: {e2}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  PUBLIC IP INFO
 # ══════════════════════════════════════════════════════════════════════════════
@@ -194,6 +291,7 @@ async def get_public_ip_info() -> Optional[dict]:
     except Exception as e:
         logger.error(f"Failed to fetch IP info: {e}")
     return None
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  IP QUALITY CHECK
 # ══════════════════════════════════════════════════════════════════════════════
@@ -222,6 +320,7 @@ async def check_ip_quality() -> bool:
             f"{info.get('city')}, {info.get('country')}"
         )
     return not _IS_BLOCKED_IP
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  WAIT FOR GOOD IP
 # ══════════════════════════════════════════════════════════════════════════════
@@ -235,6 +334,7 @@ async def wait_for_good_ip() -> None:
     )
     await _good_ip_event().wait()
     logger.info("✅ Good IP + cookies ready — resuming queued download …")
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  BACKGROUND IP WATCHER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -289,6 +389,7 @@ async def _ip_watcher_loop():
                     f"#BlockedIP"
                 )
             )
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  PLAYWRIGHT PROFILE LOCK CLEANUP
 # ══════════════════════════════════════════════════════════════════════════════
@@ -302,6 +403,7 @@ def cleanup_playwright_profile():
                 logger.info(f"🧹 Removed stale profile file: {fname}")
             except Exception as e:
                 logger.warning(f"Could not remove {fname}: {e}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  BROWSER PROFILE COOKIE GENERATION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -402,6 +504,7 @@ async def generate_cookies_via_playwright(
             )
         )
         return False
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  EXTRACT COOKIES FROM BROWSER PROFILE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -435,6 +538,7 @@ async def _extract_cookies_from_profile() -> bool:
     except Exception as exc:
         logger.error(f"Cookie extraction error: {exc}")
         return False
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  AUTO-GENERATE COOKIES
 # ══════════════════════════════════════════════════════════════════════════════
@@ -480,6 +584,7 @@ async def auto_generate_cookies(reason: str = "auto") -> Optional[str]:
         logger.error(
             "❌ All 5 sub-attempts failed — outer infinite loop will retry …")
         return None
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  COOKIE VERIFICATION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -522,6 +627,8 @@ def verify_cookies_file(filename: str) -> bool:
     except Exception as e:
         logger.error(f"Error verifying cookies file: {e}")
         return False
+
+
 def get_cookie_min_expiry(filepath: str) -> Optional[int]:
     try:
         min_exp = None
@@ -548,6 +655,8 @@ def get_cookie_min_expiry(filepath: str) -> Optional[int]:
     except Exception as e:
         logger.error(f"Failed to parse cookie expiry: {e}")
         return None
+
+
 def is_cookie_file_expired(filepath: str) -> bool:
     if not os.path.exists(filepath):
         logger.info("❌ Cookie file missing → expired")
@@ -569,6 +678,7 @@ def is_cookie_file_expired(filepath: str) -> bool:
         f"{remaining // 3600}h {(remaining % 3600) // 60}m"
     )
     return False
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ERROR CLASSIFIERS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -597,12 +707,17 @@ _FORMAT_SIGNALS = [
     "no video formats found",
     "format is not available",
 ]
+
+
 def is_auth_error(exc: Exception) -> bool:
     s = str(exc).lower()
     return any(sig in s for sig in _AUTH_SIGNALS)
+
+
 def is_format_error(exc: Exception) -> bool:
     s = str(exc).lower()
     return any(sig in s for sig in _FORMAT_SIGNALS)
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN COOKIE GETTER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -623,6 +738,7 @@ async def get_cookies(force_refresh: bool = False) -> Optional[str]:
     logger.warning("⚠️ Cookies invalid or expired → regenerating …")
     clear_old_cookies()
     return await auto_generate_cookies(reason="Initial / expired")
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  VIDEO ID EXTRACTION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -634,6 +750,8 @@ _VID_PATTERNS = [
     r"live/([A-Za-z0-9_-]{11})",
     r"embed/([A-Za-z0-9_-]{11})",
 ]
+
+
 def extract_video_id(url: str) -> Optional[str]:
     if not url:
         return None
@@ -646,10 +764,13 @@ def extract_video_id(url: str) -> Optional[str]:
     if re.match(r"^[A-Za-z0-9_-]{11}$", url):
         return url
     return None
+
+
 def is_live_url(url: str) -> bool:
     if not url:
         return False
     return bool(re.search(r"youtube\.com/live/", url, re.IGNORECASE))
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  YT-DLP OPTIONS BUILDER  (SPEED-OPTIMISED)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -659,6 +780,8 @@ def _playwright_profile_has_cookies() -> bool:
         os.path.join(PLAYWRIGHT_PROFILE_DIR, "Cookies"),
     ]
     return any(os.path.isfile(p) and os.path.getsize(p) > 0 for p in candidates)
+
+
 def get_ytdlp_opts(
     extra_opts: dict = None,
     use_cookie_file: str = None,
@@ -671,59 +794,41 @@ def get_ytdlp_opts(
         "no_warnings":        True,
         "geo_bypass":         True,
         "nocheckcertificate": True,
-
         # ── Retry / resilience ────────────────────────────────────────────
         "retries":            15,
         "fragment_retries":   15,
         "file_access_retries": 5,
         "extractor_retries":  5,
-
         # ── SPEED OPTIMISATIONS ───────────────────────────────────────────
-        # Download up to 10 DASH/HLS fragments in parallel (was 5)
         "concurrent_fragment_downloads": 10,
-        # Read 16 MB at once from the network socket (was default ~10 KB)
-        "http_chunk_size": 10 * 1024 * 1024,        # 10 MB per chunk
-        # Internal I/O buffer — reduces syscall overhead
-        "buffersize": 16 * 1024,                     # 16 KB
-        # Tell the server we accept byte ranges (enables resume + parallelism)
+        "http_chunk_size": 10 * 1024 * 1024,
+        "buffersize": 16 * 1024,
         "continuedl": True,
-        # Skip format availability checks — saves an extra HTTP request
         "check_formats": False,
-        # Skip writing thumbnail / description / etc.
         "writethumbnail": False,
         "writeinfojson":  False,
         "writesubtitles": False,
-        # Don't wait between retries
         "sleep_interval":       0,
         "max_sleep_interval":   0,
         "sleep_interval_requests": 0,
-
         # ── Cache ─────────────────────────────────────────────────────────
         "cachedir": YT_CACHE_DIR,
-
-        # ── Player clients — try fastest first ────────────────────────────
+        # ── Player clients ────────────────────────────────────────────────
         "extractor_args": {
             "youtube": {
                 "player_client": ["ios", "android", "web", "tv_embedded"],
-                # Skip age-gate bypass attempts when not needed
                 "skip": ["webpage"],
             }
         },
-
         # ── Headers ───────────────────────────────────────────────────────
         "http_headers": {
             "User-Agent":      ua,
             "Accept-Language": "en-US,en;q=0.9",
-            # Signal that we accept gzip/br compressed responses
             "Accept-Encoding": "gzip, deflate, br",
         },
-
-        # ── Socket timeout ────────────────────────────────────────────────
         "socket_timeout": 30,
-        "source_address": "0.0.0.0",   # bind to all interfaces
+        "source_address": "0.0.0.0",
     }
-
-    # ── Cookie source (priority: file > profile DB > none) ────────────────
     if use_cookie_file and os.path.isfile(use_cookie_file):
         base["cookiefile"] = use_cookie_file
         logger.debug(f"Using cookiefile: {use_cookie_file}")
@@ -732,15 +837,13 @@ def get_ytdlp_opts(
         logger.debug("Using cookiesfrombrowser with persistent profile")
     else:
         logger.debug("No cookie source available — proceeding without cookies")
-
-    # ── Optional proxy ────────────────────────────────────────────────────
     proxy = choose_random_proxy(YTDLP_PROXY_POOL)
     if proxy:
         base["proxy"] = proxy
-
     if extra_opts:
         base.update(extra_opts)
     return base
+
 
 def _audio_extra() -> dict:
     return {
@@ -752,11 +855,13 @@ def _audio_extra() -> dict:
         }],
     }
 
+
 def _video_extra() -> dict:
     return {
         "format":              "bv*+ba/b",
         "merge_output_format": "mp4",
     }
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  FILE FINDER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -779,6 +884,7 @@ def _get_downloaded_file(
             if video_id in f:
                 return os.path.join(DOWNLOAD_DIR, f)
     return None
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  PROGRESS BAR HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -786,6 +892,7 @@ def _make_progress_bar(percent: float, length: int = 10) -> str:
     filled = int(length * percent / 100)
     bar    = "▓" * filled + "░" * (length - filled)
     return f"[{bar}]"
+
 
 def _fmt_bytes(num_bytes: float) -> str:
     if num_bytes is None:
@@ -796,6 +903,7 @@ def _fmt_bytes(num_bytes: float) -> str:
     kb = num_bytes / 1024
     return f"{kb:.0f}KB"
 
+
 def _fmt_speed(speed: float) -> str:
     if speed is None or speed <= 0:
         return "?MB/s"
@@ -804,6 +912,7 @@ def _fmt_speed(speed: float) -> str:
         return f"{mb:.1f}MB/s"
     kb = speed / 1024
     return f"{kb:.0f}KB/s"
+
 
 def _fmt_eta(eta_seconds) -> str:
     if eta_seconds is None:
@@ -814,6 +923,7 @@ def _fmt_eta(eta_seconds) -> str:
     if eta >= 60:
         return f"{eta // 60}m {eta % 60}s"
     return f"{eta}s"
+
 
 def _build_progress_text(title: str, d: dict) -> str:
     short_title = (title[:13] + "..") if len(title) > 13 else title
@@ -833,40 +943,25 @@ def _build_progress_text(title: str, d: dict) -> str:
         f"`{_fmt_speed(speed)}` • ETA `{_fmt_eta(eta)}`"
     )
     return f"{line1}\n{line2}\n{line3}"
+
 # ══════════════════════════════════════════════════════════════════════════════
-#  PROGRESS HOOK FACTORY  (FIXED — works correctly during download)
-#
-#  Root cause of the original bug:
-#    • yt-dlp calls the hook from a ThreadPoolExecutor worker thread.
-#    • asyncio.run_coroutine_threadsafe() is the only safe way to schedule
-#      coroutines from a non-async thread onto the running event loop.
-#    • The loop must be captured BEFORE the executor starts (done here via
-#      the `loop` parameter passed in from the caller).
-#    • We store `last_update` in a mutable dict (not a closure variable)
-#      so the thread-local mutation is visible across calls.
-#    • The "finished" guard prevents a race where the hook fires one last
-#      "downloading" event after the "finished" event.
+#  PROGRESS HOOK FACTORY
 # ══════════════════════════════════════════════════════════════════════════════
 def make_progress_hook(
     loop: asyncio.AbstractEventLoop,
     mystic,
     title: str,
 ) -> callable:
-    # Use a mutable dict so the nested function can mutate shared state
-    # without `nonlocal` (which doesn't work across thread boundaries reliably).
     state = {
         "last_update": 0.0,
         "finished":    False,
     }
 
     def hook(d: dict):
-        # d is the yt-dlp progress dict — called from a worker thread
         if state["finished"]:
             return
-
-        now    = time.monotonic()   # monotonic is thread-safe
+        now    = time.monotonic()
         status = d.get("status", "")
-
         if status == "finished":
             state["finished"] = True
             short = (title[:13] + "..") if len(title) > 13 else title
@@ -878,21 +973,17 @@ def make_progress_hook(
                 loop,
             )
             return
-
         if status == "downloading":
-            # Throttle: don't spam Telegram more often than every N seconds
             if now - state["last_update"] < PROGRESS_UPDATE_INTERVAL:
                 return
             state["last_update"] = now
-
-            # Build and schedule the Telegram edit — non-blocking from this thread
             text = _build_progress_text(title, d)
             asyncio.run_coroutine_threadsafe(_safe_edit(mystic, text), loop)
 
     return hook
 
+
 async def _safe_edit(mystic, text: str):
-    """Edit mystic message safely, ignoring flood-wait and not-modified errors."""
     try:
         await mystic.edit_text(text)
     except Exception as e:
@@ -903,57 +994,66 @@ async def _safe_edit(mystic, text: str):
             pass
         else:
             logger.debug(f"Progress edit error (ignored): {e}")
+
 # ══════════════════════════════════════════════════════════════════════════════
-#  METHOD 1 — API DOWNLOAD  (with progress bar support)
+#  METHOD 1 — API DOWNLOAD  (multi-endpoint fallback + progress bar)
+#
+#  Tries each endpoint in API_ENDPOINTS in order.
+#  Only advances to the next endpoint when ALL retries for the current one fail.
+#  Falls back to yt-dlp (Method 2/3) when every endpoint is exhausted.
 # ══════════════════════════════════════════════════════════════════════════════
-async def _download_via_api(
+async def _try_single_api_endpoint(
+    ep_url: str,
+    ep_key: str,
+    ep_label: str,
     video_id: str,
     media_type: str,
+    out_path: str,
+    display_title: str,
     mystic=None,
-    title: str = "",
 ) -> Optional[str]:
-    if not API_URL:
-        return None
-    ext      = "mp3" if media_type == "audio" else "mp4"
-    out_path = os.path.join(DOWNLOAD_DIR, f"{video_id}.{ext}")
-    headers  = {"Content-Type": "application/json"}
-    if API_KEY:
-        headers["X-API-KEY"] = API_KEY
-    display_title = title or video_id
-    logger.info(f"📡 [API] {media_type} download for {video_id} …")
+    """
+    Attempt to download from ONE API endpoint with up to MAX_API_RETRIES tries.
+    Returns the file path on success, None on failure.
+    """
+    headers = {"Content-Type": "application/json"}
+    if ep_key:
+        headers["X-API-KEY"] = ep_key
+
     for attempt in range(1, MAX_API_RETRIES + 1):
         try:
             async with aiohttp.ClientSession() as session:
                 params = {"url": video_id, "type": media_type}
                 async with session.get(
-                    f"{API_URL}/download",
+                    f"{ep_url}/download",
                     params=params,
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
                     if resp.status != 200:
-                        raise ValueError(f"API /download → HTTP {resp.status}")
+                        raise ValueError(
+                            f"{ep_label} /download → HTTP {resp.status}")
                     data  = await resp.json()
                     token = data.get("download_token") or data.get("token")
                     dl_url = (
                         data.get("download_url")
                         or (
-                            f"{API_URL}/stream/{video_id}"
+                            f"{ep_url}/stream/{video_id}"
                             f"?type={media_type}&token={token}"
                             if token else None
                         )
                     )
                     if not dl_url:
-                        raise ValueError("No download URL in API response")
+                        raise ValueError(
+                            f"{ep_label} No download URL in API response")
                     if not dl_url.startswith("http"):
-                        dl_url = API_URL + dl_url
+                        dl_url = ep_url + dl_url
 
-                last_update  = 0.0
-                downloaded   = 0
-                total        = 0
-                start_time   = time.monotonic()
+                last_update = 0.0
+                downloaded  = 0
+                total       = 0
+                start_time  = time.monotonic()
 
-                # Show initial progress immediately
                 if mystic:
                     await _safe_edit(mystic, _build_progress_text(display_title, {
                         "downloaded_bytes": 0, "total_bytes": None,
@@ -967,10 +1067,13 @@ async def _download_via_api(
                     allow_redirects=True,
                 ) as file_resp:
                     if file_resp.status not in (200, 206):
-                        raise ValueError(f"File stream → HTTP {file_resp.status}")
+                        raise ValueError(
+                            f"{ep_label} File stream → HTTP {file_resp.status}")
                     total = int(file_resp.headers.get("Content-Length", 0))
                     with open(out_path, "wb") as fh:
-                        async for chunk in file_resp.content.iter_chunked(1024 * 1024):
+                        async for chunk in file_resp.content.iter_chunked(
+                            1024 * 1024
+                        ):
                             fh.write(chunk)
                             downloaded += len(chunk)
                             now = time.monotonic()
@@ -980,20 +1083,20 @@ async def _download_via_api(
                                 speed   = downloaded / elapsed
                                 eta     = (
                                     (total - downloaded) / speed
-                                    if speed > 0 and total > 0
-                                    else None
+                                    if speed > 0 and total > 0 else None
                                 )
-                                fake_d = {
-                                    "downloaded_bytes": downloaded,
-                                    "total_bytes":      total if total > 0 else None,
-                                    "speed":            speed,
-                                    "eta":              eta,
-                                }
-                                await _safe_edit(mystic, _build_progress_text(
-                                    display_title, fake_d))
+                                await _safe_edit(
+                                    mystic,
+                                    _build_progress_text(display_title, {
+                                        "downloaded_bytes": downloaded,
+                                        "total_bytes": total if total > 0 else None,
+                                        "speed": speed,
+                                        "eta":   eta,
+                                    }),
+                                )
 
             if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-                logger.info(f"✅ [API] Downloaded: {out_path}")
+                logger.info(f"✅ {ep_label} Downloaded: {out_path}")
                 if mystic:
                     short = (
                         (display_title[:13] + "..")
@@ -1005,9 +1108,12 @@ async def _download_via_api(
                         f"🎵 `{short}`\n✅ Download complete, processing…",
                     )
                 return out_path
-            raise ValueError("File is empty after API download.")
+
+            raise ValueError(f"{ep_label} File empty after download.")
+
         except Exception as exc:
-            logger.warning(f"[API] Attempt {attempt}/{MAX_API_RETRIES} failed: {exc}")
+            logger.warning(
+                f"{ep_label} Attempt {attempt}/{MAX_API_RETRIES} failed: {exc}")
             if os.path.exists(out_path):
                 try:
                     os.remove(out_path)
@@ -1015,10 +1121,59 @@ async def _download_via_api(
                     pass
             if attempt < MAX_API_RETRIES:
                 await asyncio.sleep(2 * attempt)
-    logger.error("[API] All attempts exhausted.")
+
+    logger.warning(f"{ep_label} All {MAX_API_RETRIES} attempts exhausted.")
     return None
+
+
+async def _download_via_api(
+    video_id: str,
+    media_type: str,
+    mystic=None,
+    title: str = "",
+) -> Optional[str]:
+    """
+    Try every API endpoint in API_ENDPOINTS until one succeeds.
+    Returns the local file path on success, None when all endpoints fail.
+    """
+    if not API_ENDPOINTS:
+        logger.info("📡 No API endpoints configured — skipping API download.")
+        return None
+
+    ext           = "mp3" if media_type == "audio" else "mp4"
+    out_path      = os.path.join(DOWNLOAD_DIR, f"{video_id}.{ext}")
+    display_title = title or video_id
+    total_eps     = len(API_ENDPOINTS)
+
+    for idx, (ep_url, ep_key) in enumerate(API_ENDPOINTS):
+        ep_label = f"[API {idx + 1}/{total_eps} | {ep_url}]"
+        logger.info(
+            f"📡 {ep_label} {media_type} download for {video_id} …")
+
+        result = await _try_single_api_endpoint(
+            ep_url=ep_url,
+            ep_key=ep_key,
+            ep_label=ep_label,
+            video_id=video_id,
+            media_type=media_type,
+            out_path=out_path,
+            display_title=display_title,
+            mystic=mystic,
+        )
+        if result:
+            return result
+
+        if idx < total_eps - 1:
+            logger.warning(
+                f"📡 {ep_label} Failed — trying next endpoint …")
+        else:
+            logger.error(
+                f"📡 All {total_eps} API endpoint(s) exhausted for {video_id}.")
+
+    return None
+
 # ══════════════════════════════════════════════════════════════════════════════
-#  METHODS 2 & 3 — YT-DLP  (with progress bar support, FIXED hook)
+#  METHODS 2 & 3 — YT-DLP  (with progress bar support, fixed hook)
 # ══════════════════════════════════════════════════════════════════════════════
 async def download_with_ytdlp(
     link: str,
@@ -1030,13 +1185,11 @@ async def download_with_ytdlp(
     if not video_id:
         logger.error(f"Could not extract video ID from {link}")
         return None
-
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     existing = _get_downloaded_file(video_id)
     if existing:
         logger.info(f"📁 File already exists: {existing}")
         return existing
-
     if is_blocked_ip():
         info = _CURRENT_IP_INFO
         await send_to_log_group(
@@ -1052,10 +1205,7 @@ async def download_with_ytdlp(
             )
         )
         await wait_for_good_ip()
-
     cookie_file     = await get_cookies()
-    # Capture the running event loop BEFORE any executor calls.
-    # This is the loop that asyncio.run_coroutine_threadsafe must target.
     loop            = asyncio.get_event_loop()
     format_fallback = False
     non_auth_errors = 0
@@ -1079,24 +1229,19 @@ async def download_with_ytdlp(
         return opts
 
     while True:
-        # Create a fresh progress hook for each attempt so state resets
         prog_hook = make_progress_hook(loop, mystic, display_title) if mystic else None
         ydl_opts  = _build_opts(cookie_file, prog_hook)
-
         logger.info(
             f"{label} [yt-dlp] {video_id} | "
             f"cookie_cycle={cookie_cycle} | "
             f"non_auth_errs={non_auth_errors} | "
             f"format_fallback={format_fallback}"
         )
-
-        # Show an initial "starting" message so the user sees something immediately
         if mystic:
             await _safe_edit(mystic, _build_progress_text(display_title, {
                 "downloaded_bytes": 0, "total_bytes": None,
                 "speed": None, "eta": None,
             }))
-
         try:
             await asyncio.sleep(random.uniform(0.5, 2.0))
             async with DOWNLOAD_SEMAPHORE:
@@ -1105,22 +1250,18 @@ async def download_with_ytdlp(
                         None,
                         lambda: ydl.extract_info(link, download=True),
                     )
-
             file_path = _get_downloaded_file(video_id)
             if not file_path and info:
                 candidate = info.get("_filename") or info.get("filepath")
                 if candidate and os.path.exists(candidate):
                     file_path = candidate
-
             if file_path and os.path.exists(file_path):
                 logger.info(f"✅ {label} Download successful: {file_path}")
                 return file_path
             raise RuntimeError("File not found after yt-dlp download completed.")
-
         except Exception as exc:
             err_str = str(exc)
             logger.error(f"{label} [yt-dlp] Error: {err_str[:300]}")
-
             if is_auth_error(exc):
                 await check_ip_quality()
                 if is_blocked_ip():
@@ -1138,14 +1279,12 @@ async def download_with_ytdlp(
                     await wait_for_good_ip()
                     cookie_file = await get_cookies()
                     continue
-
             if is_format_error(exc) and not format_fallback:
                 logger.warning("⚠️ Format unavailable — switching to 'best' format …")
                 format_fallback = True
                 non_auth_errors = 0
                 await asyncio.sleep(2)
                 continue
-
             if is_auth_error(exc) or "file not found" in err_str.lower():
                 cookie_cycle   += 1
                 non_auth_errors = 0
@@ -1192,7 +1331,6 @@ async def download_with_ytdlp(
                 )
                 await asyncio.sleep(random.uniform(1, 3))
                 continue
-
             non_auth_errors += 1
             logger.warning(
                 f"Non-auth error #{non_auth_errors}/{MAX_NON_AUTH_ERRS}: "
@@ -1205,6 +1343,7 @@ async def download_with_ytdlp(
                 )
                 return None
             await asyncio.sleep(5 * non_auth_errors)
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  PUBLIC DOWNLOAD WRAPPERS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1218,8 +1357,9 @@ async def download_song(
     result = await _download_via_api(vid, "audio", mystic=mystic, title=title)
     if result:
         return result
-    logger.info("🎵 API failed / not configured — falling back to yt-dlp …")
+    logger.info("🎵 All API endpoints failed / not configured — falling back to yt-dlp …")
     return await download_with_ytdlp(link, is_audio=True, mystic=mystic, title=title)
+
 
 async def download_video(
     link: str,
@@ -1231,13 +1371,15 @@ async def download_video(
     result = await _download_via_api(vid, "video", mystic=mystic, title=title)
     if result:
         return result
-    logger.info("🎬 API failed / not configured — falling back to yt-dlp …")
+    logger.info("🎬 All API endpoints failed / not configured — falling back to yt-dlp …")
     return await download_with_ytdlp(link, is_audio=False, mystic=mystic, title=title)
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  STREAMING HELPER
 # ══════════════════════════════════════════════════════════════════════════════
 STREAM_MIN_SIZE = 500_000
 STREAM_FORMAT   = "140/bestaudio"
+
 
 async def wait_for_partial_file(
     file_path: str,
@@ -1248,6 +1390,7 @@ async def wait_for_partial_file(
         if os.path.exists(file_path) and os.path.getsize(file_path) > min_size:
             return
         await asyncio.sleep(check_interval)
+
 
 async def download_song_stream(
     link: str,
@@ -1282,6 +1425,7 @@ async def download_song_stream(
         logger.error(f"Streaming wait error: {e}")
         task.cancel()
         return None, None
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  LIVE STREAM — INTERNAL URL PICKER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1314,53 +1458,110 @@ def _pick_stream_url(info: dict, video: bool) -> Optional[str]:
         candidates.sort(
             key=lambda f: f.get("abr") or f.get("tbr") or 0, reverse=True)
     return candidates[0]["url"] if candidates else None
+
 # ══════════════════════════════════════════════════════════════════════════════
-#  LIVE STREAM — METHOD 1: API
+#  LIVE STREAM — METHOD 1: API (multi-endpoint fallback)
+#
+#  Tries each endpoint in API_ENDPOINTS in order.
+#  Falls back to yt-dlp when all endpoints fail.
 # ══════════════════════════════════════════════════════════════════════════════
-async def _live_stream_via_api(
+async def _try_single_live_api_endpoint(
+    ep_url: str,
+    ep_key: str,
+    ep_label: str,
     video_id: str,
-    video: bool = False,
+    media_type: str,
 ) -> Optional[str]:
-    if not API_URL:
-        return None
-    media_type = "livestream_video" if video else "livestream_audio"
-    headers    = {"Content-Type": "application/json"}
-    if API_KEY:
-        headers["X-API-KEY"] = API_KEY
-    logger.info(f"📡 [live/API] Trying API for live stream: {video_id} | type={media_type}")
+    """
+    Try ONE live stream endpoint with up to MAX_API_RETRIES attempts.
+    Returns stream URL string on success, None on failure.
+    """
+    headers = {"Content-Type": "application/json"}
+    if ep_key:
+        headers["X-API-KEY"] = ep_key
+
     for attempt in range(1, MAX_API_RETRIES + 1):
         try:
             async with aiohttp.ClientSession() as session:
                 params = {"url": video_id, "type": media_type}
                 async with session.get(
-                    f"{API_URL}/download",
+                    f"{ep_url}/download",
                     params=params,
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
                     if resp.status != 200:
-                        raise ValueError(f"API /download → HTTP {resp.status}")
+                        raise ValueError(
+                            f"{ep_label} /download → HTTP {resp.status}")
                     data = await resp.json()
+
             stream_url = data.get("stream_url") or data.get("hls_url")
             if not stream_url:
                 token  = data.get("download_token") or data.get("token")
                 dl_url = data.get("download_url") or (
-                    f"{API_URL}/stream/{video_id}?type={media_type}&token={token}"
+                    f"{ep_url}/stream/{video_id}?type={media_type}&token={token}"
                     if token else None
                 )
                 if dl_url:
-                    stream_url = dl_url if dl_url.startswith("http") else API_URL + dl_url
+                    stream_url = (
+                        dl_url if dl_url.startswith("http")
+                        else ep_url + dl_url
+                    )
             if not stream_url:
-                raise ValueError("No stream URL in API response")
-            logger.info(f"✅ [live/API] Got stream URL from API")
+                raise ValueError(f"{ep_label} No stream URL in API response")
+
+            logger.info(f"✅ {ep_label} Got stream URL from API")
             return stream_url
+
         except Exception as exc:
             logger.warning(
-                f"[live/API] Attempt {attempt}/{MAX_API_RETRIES} failed: {exc}")
+                f"{ep_label} Live attempt {attempt}/{MAX_API_RETRIES} failed: {exc}")
             if attempt < MAX_API_RETRIES:
                 await asyncio.sleep(2 * attempt)
-    logger.warning("[live/API] All API attempts failed — falling back to yt-dlp")
+
+    logger.warning(f"{ep_label} All live API attempts exhausted.")
     return None
+
+
+async def _live_stream_via_api(
+    video_id: str,
+    video: bool = False,
+) -> Optional[str]:
+    """
+    Try every API endpoint for live-stream URL resolution.
+    Returns the stream URL on first success, None when all endpoints fail.
+    """
+    if not API_ENDPOINTS:
+        return None
+
+    media_type = "livestream_video" if video else "livestream_audio"
+    total_eps  = len(API_ENDPOINTS)
+
+    for idx, (ep_url, ep_key) in enumerate(API_ENDPOINTS):
+        ep_label = f"[live/API {idx + 1}/{total_eps} | {ep_url}]"
+        logger.info(
+            f"📡 {ep_label} Trying live stream for {video_id} | type={media_type}")
+
+        result = await _try_single_live_api_endpoint(
+            ep_url=ep_url,
+            ep_key=ep_key,
+            ep_label=ep_label,
+            video_id=video_id,
+            media_type=media_type,
+        )
+        if result:
+            return result
+
+        if idx < total_eps - 1:
+            logger.warning(
+                f"📡 {ep_label} Failed — trying next endpoint …")
+        else:
+            logger.warning(
+                f"[live/API] All {total_eps} endpoint(s) failed — "
+                f"falling back to yt-dlp …")
+
+    return None
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  LIVE STREAM — METHOD 2: YT-DLP WITH COOKIE FILE / COOKIE REGEN
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1381,12 +1582,10 @@ async def _live_stream_via_ytdlp(
             )
         )
         await wait_for_good_ip()
-
     cookie_file  = await get_cookies()
     loop         = asyncio.get_event_loop()
     cookie_cycle = 0
     fmt_selector = "bv*+ba/b/best" if video else "bestaudio[ext=m4a]/bestaudio/best"
-
     while True:
         cf = cookie_file if (cookie_file and os.path.isfile(cookie_file)) else None
         ydl_opts = get_ytdlp_opts(
@@ -1425,7 +1624,6 @@ async def _live_stream_via_ytdlp(
         except Exception as exc:
             err_str = str(exc)
             logger.error(f"📡 [live/yt-dlp] Error: {err_str[:300]}")
-
             if is_auth_error(exc):
                 await check_ip_quality()
                 if is_blocked_ip():
@@ -1444,7 +1642,6 @@ async def _live_stream_via_ytdlp(
                     await wait_for_good_ip()
                     cookie_file = await get_cookies()
                     continue
-
             if is_auth_error(exc):
                 cookie_cycle += 1
                 logger.warning(
@@ -1483,7 +1680,6 @@ async def _live_stream_via_ytdlp(
                 cookie_file = new_cf
                 await asyncio.sleep(random.uniform(1, 3))
                 continue
-
             logger.error(
                 f"📡 [live/yt-dlp] Non-retryable error for {link}: "
                 f"{err_str[:300]}"
@@ -1497,6 +1693,7 @@ async def _live_stream_via_ytdlp(
                 )
             )
             return None
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  LIVE STREAM — PUBLIC ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1506,26 +1703,31 @@ async def live_stream(
 ) -> Optional[str]:
     logger.info(f"🔴 [live_stream] Start | link={link} | video={video}")
     vid = extract_video_id(link) or link
-    if API_URL:
+    if API_ENDPOINTS:
         result = await _live_stream_via_api(vid, video=video)
         if result:
             logger.info("✅ [live_stream] Resolved via API")
             return result
-        logger.info("📡 [live_stream] API failed / not configured — trying yt-dlp …")
+        logger.info("📡 [live_stream] All API endpoints failed — trying yt-dlp …")
+    else:
+        logger.info("📡 [live_stream] No API endpoints — using yt-dlp directly …")
     result = await _live_stream_via_ytdlp(link, video=video)
     if result:
         logger.info("✅ [live_stream] Resolved via yt-dlp")
         return result
     logger.error(f"❌ [live_stream] All methods failed for: {link}")
+    ep_list = ", ".join(f"{u}" for u, _ in API_ENDPOINTS) if API_ENDPOINTS else "none"
     await send_to_log_group(
         text=(
             f"❌ **Live Stream Resolution Failed — All Methods**\n\n"
-            f"🔗 URL  : `{link}`\n"
-            f"📋 Tried: API → yt-dlp+cookies\n\n"
+            f"🔗 URL      : `{link}`\n"
+            f"📋 APIs tried: {ep_list}\n"
+            f"📋 Also tried: yt-dlp + cookies\n\n"
             f"#LiveStream"
         )
     )
     return None
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  PLAY_URL AUTO-TEST
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1659,6 +1861,7 @@ async def test_cookie_with_playurl(retries: int = 2):
                     f"#CookieTest"
                 )
             )
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  UTILITY
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1676,6 +1879,7 @@ async def shell_cmd(cmd: str) -> str:
         return decoded
     return out.decode("utf-8")
 
+
 async def check_file_size(link: str) -> Optional[int]:
     try:
         ydl_opts = get_ytdlp_opts(
@@ -1683,6 +1887,7 @@ async def check_file_size(link: str) -> Optional[int]:
             use_cookie_file=COOKIE_FILE if os.path.isfile(COOKIE_FILE) else None,
         )
         loop = asyncio.get_event_loop()
+
         def _get_size():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info  = ydl.extract_info(link, download=False)
@@ -1692,11 +1897,13 @@ async def check_file_size(link: str) -> Optional[int]:
                     if size:
                         total += size
                 return total
+
         return await asyncio.wait_for(
             loop.run_in_executor(None, _get_size), timeout=60)
     except Exception as e:
         logger.error(f"Failed to get file size: {e}")
         return None
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  COOKIE STARTUP HELPER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1727,6 +1934,7 @@ async def _run_cookie_startup():
         logger.info("✅ Existing cookies valid — skipping regeneration.")
     logger.info("🎬 Running PLAY_URL startup test …")
     await test_cookie_with_playurl(retries=2)
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  STARTUP
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1734,6 +1942,28 @@ async def startup_services():
     if not ENABLE_YT_COOKIES:
         logger.info("YouTube cookie handling disabled (ENABLE_YT_COOKIES=false).")
         return
+
+    # Log active API endpoints at startup
+    if API_ENDPOINTS:
+        ep_summary = "\n".join(
+            f"  [{i+1}] {url}  (key: {'set' if key else 'none'})"
+            for i, (url, key) in enumerate(API_ENDPOINTS)
+        )
+        logger.info(
+            f"📡 Active API endpoints ({len(API_ENDPOINTS)}):\n{ep_summary}")
+        await send_to_log_group(
+            text=(
+                f"📡 **API Endpoints Loaded ({len(API_ENDPOINTS)})**\n\n"
+                + "\n".join(
+                    f"`[{i+1}]` `{url}` — key: {'✅ set' if key else '❌ none'}"
+                    for i, (url, key) in enumerate(API_ENDPOINTS)
+                )
+                + "\n\n#Startup #APIEndpoints"
+            )
+        )
+    else:
+        logger.warning("⚠️ No API endpoints configured — yt-dlp only mode.")
+
     logger.info("🚀 Starting YouTube services …")
     good = await check_ip_quality()
     info = _CURRENT_IP_INFO
@@ -1782,6 +2012,7 @@ async def startup_services():
     _good_ip_event().set()
     logger.info("✅ Startup complete — event set, downloads enabled.")
     asyncio.create_task(_ip_watcher_loop())
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  YouTubeAPI CLASS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1874,7 +2105,10 @@ class YouTubeAPI:
                     f"treating as live: {link}"
                 )
                 live_title = r.get("title") or link
-                live_thumb = r["thumbnails"][0]["url"].split("?")[0] if r.get("thumbnails") else ""
+                live_thumb = (
+                    r["thumbnails"][0]["url"].split("?")[0]
+                    if r.get("thumbnails") else ""
+                )
                 return (
                     {
                         "title":        live_title,
@@ -1978,6 +2212,7 @@ class YouTubeAPI:
         cf       = COOKIE_FILE if os.path.isfile(COOKIE_FILE) else None
         ydl_opts = get_ytdlp_opts({"quiet": True}, use_cookie_file=cf)
         loop     = asyncio.get_event_loop()
+
         def _get():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(link, download=False)
@@ -1996,6 +2231,7 @@ class YouTubeAPI:
                     except Exception:
                         pass
                 return out
+
         try:
             result = await asyncio.wait_for(
                 loop.run_in_executor(None, _get), timeout=60)
