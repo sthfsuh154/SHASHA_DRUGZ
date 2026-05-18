@@ -335,7 +335,7 @@ async def kang(client, message: Message):
 # ------------------------------------------------------------------------------
 @app.on_message(filters.command("geteffects") & SUDOERS)
 async def get_effects(client, message: Message):
-    wait = await message.reply_text("⏳ Fetching effects via assistant...")
+    wait = await message.reply_text("⏳ Fetching effects...")
 
     # ── Get the userbot client ────────────────────────────────────────────────
     try:
