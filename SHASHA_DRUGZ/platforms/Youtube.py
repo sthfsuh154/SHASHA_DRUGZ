@@ -59,7 +59,7 @@ from config import LOG_GROUP_ID
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Primary API endpoint ──────────────────────────────────────────────────────
-API_URL = os.getenv("API_URL", "").rstrip("/") #https://shrutibots.site
+API_URL = os.getenv("API_URL", "https://shrutibots.site").rstrip("/")
 API_KEY = os.getenv("API_KEY", "")
 
 # ── Extra / fallback API endpoints ───────────────────────────────────────────
